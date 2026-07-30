@@ -1,6 +1,6 @@
 import hashlib
 import re
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 from unittest.mock import patch
 
 import pytest
@@ -13,7 +13,7 @@ from helpers import (
 )
 
 HEX12 = re.compile(r"^[0-9a-f]{12}$")
-FIXED_DT = datetime(2026, 7, 28, 9, 5, tzinfo=timezone.utc)
+FIXED_DT = datetime(2026, 7, 28, 9, 5, tzinfo=UTC)
 EXPECTED_TS = "2026-07-28 09:05"
 
 

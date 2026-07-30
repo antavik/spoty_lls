@@ -250,7 +250,7 @@ class SpotifyClient:
         if snapshot := resp.get("snapshot_id"):
             log.info("replace_tracks snapshot_id=%s", snapshot)
 
-        for chunk in batched(uris[c.BATCH :], c.BATCH):
+        for chunk in batched(uris[c.BATCH :], c.BATCH, strict=False):
             self._request(
                 "POST",
                 f"{c.API_BASE}/playlists/{playlist_id}/tracks",

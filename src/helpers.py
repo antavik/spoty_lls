@@ -1,7 +1,7 @@
 import hashlib
 import re
 
-from datetime import datetime, timezone
+from datetime import datetime, UTC
 
 _HASH_RE = re.compile(r"\[#([0-9a-f]{12})\]")
 
@@ -20,7 +20,7 @@ def parse_hash(description: str | None) -> str | None:
 
 
 def build_description(count: int, digest: str) -> str:
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M")
+    ts = datetime.now(UTC).strftime("%Y-%m-%d %H:%M")
 
     return f"{count} most recently liked songs. Auto-updated {ts} UTC. [#{digest}]"
 
