@@ -9,12 +9,12 @@ AUTHORIZE_URL = "https://accounts.spotify.com/authorize"
 
 # Sync tuning / Spotify API limits
 LIKED_LIMIT = 100  # max tracks to sync
-PAGE = 50          # Spotify max page size for /me/tracks
-BATCH = 100        # Spotify max items per add/remove request
+PAGE = 50  # Spotify max page size for /me/tracks
+BATCH = 100  # Spotify max items per add/remove request
 
 # HTTP behaviour
 MAX_RETRIES = 3
-RETRY_DELAY = 2       # seconds between retries on 5xx / network errors
+RETRY_DELAY = 2  # seconds between retries on 5xx / network errors
 MAX_RETRY_WAIT = 300  # max seconds to wait on 429 (capped Retry-After)
 REQUEST_TIMEOUT = 15  # seconds per HTTP request
 

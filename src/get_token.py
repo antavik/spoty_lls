@@ -23,12 +23,14 @@ def main() -> None:
     client_secret = c.CLIENT_SECRET
     redirect_uri = c.REDIRECT_URI
 
-    params = urllib.parse.urlencode({
-        "client_id": client_id,
-        "response_type": "code",
-        "redirect_uri": redirect_uri,
-        "scope": c.SCOPES,
-    })
+    params = urllib.parse.urlencode(
+        {
+            "client_id": client_id,
+            "response_type": "code",
+            "redirect_uri": redirect_uri,
+            "scope": c.SCOPES,
+        }
+    )
 
     print("\n1) Open this URL in your browser and click 'Agree':\n")
     print(f"{c.AUTHORIZE_URL}?{params}")

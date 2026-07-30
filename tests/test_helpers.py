@@ -20,6 +20,7 @@ EXPECTED_TS = "2026-07-28 09:05"
 # --------------------------------------------------------------------------- #
 # compute_uris_hash                                                           #
 # --------------------------------------------------------------------------- #
+# fmt: off
 @pytest.mark.parametrize(
     "uris,expected",
     [
@@ -27,6 +28,7 @@ EXPECTED_TS = "2026-07-28 09:05"
         pytest.param(["a", "b"], "fb8e20fc2e4c", id="multi"),
     ],
 )
+# fmt: on
 def test_compute_uris_hash_golden(uris, expected):
     got = compute_uris_hash(uris)
 
@@ -34,6 +36,7 @@ def test_compute_uris_hash_golden(uris, expected):
     assert got == expected
 
 
+# fmt: off
 @pytest.mark.parametrize(
     "uris",
     [
@@ -42,6 +45,7 @@ def test_compute_uris_hash_golden(uris, expected):
         pytest.param(["ünïcodé", "🎵"],   id="unicode"),
     ],
 )
+# fmt: on
 def test_compute_uris_hash_shape(uris):
     assert HEX12.match(compute_uris_hash(uris))
 
@@ -69,6 +73,7 @@ def test_compute_uris_hash_matches_hashlib():
 # --------------------------------------------------------------------------- #
 # parse_hash                                                                  #
 # --------------------------------------------------------------------------- #
+# fmt: off
 @pytest.mark.parametrize(
     "desc, expected",
     [
@@ -86,6 +91,7 @@ def test_compute_uris_hash_matches_hashlib():
         pytest.param("[#aaaaaaaaaaaa][#bbbbbbbbbbbb]", "aaaaaaaaaaaa", id="first-match-wins"),
     ],
 )
+# fmt: on
 def test_parse_hash(desc, expected):
     assert parse_hash(desc) == expected
 
@@ -93,7 +99,7 @@ def test_parse_hash(desc, expected):
 # --------------------------------------------------------------------------- #
 # build_description                                                           #
 # --------------------------------------------------------------------------- #
-@patch('helpers.datetime')
+@patch("helpers.datetime")
 @pytest.mark.parametrize(
     "count, digest, expected",
     [
@@ -117,7 +123,7 @@ def test_build_description_exact(mock_datetime, count, digest, expected):
     assert build_description(count, digest) == expected
 
 
-@patch('helpers.datetime')
+@patch("helpers.datetime")
 def test_build_description_roundtrip_with_parse_hash(mock_datetime):
     mock_datetime.now.return_value = FIXED_DT
     desc = build_description(10, "0123456789ab")
@@ -128,6 +134,7 @@ def test_build_description_roundtrip_with_parse_hash(mock_datetime):
 # --------------------------------------------------------------------------- #
 # str2bool                                                                    #
 # --------------------------------------------------------------------------- #
+# fmt: off
 @pytest.mark.parametrize(
     "val, expected",
     [
@@ -135,14 +142,22 @@ def test_build_description_roundtrip_with_parse_hash(mock_datetime):
         pytest.param(False,      False, id="bool-false"),
         pytest.param("  true  ", True,  id="strip-true"),
         pytest.param("   ",      False, id="whitespace-only-to-empty-false"),
-        *[(v, True) for v in ("1", "yes", "Yes", "YES", "y", "Y", "true", "True", "TRUE", "t")],
-        *[(v, False) for v in ("0", "no", "No", "NO", "n", "N", "false", "False", "FALSE", "f", "")],
+        *[
+            (v, True)
+            for v in ("1", "yes", "Yes", "YES", "y", "Y", "true", "True", "TRUE", "t")
+        ],
+        *[
+            (v, False)
+            for v in ("0", "no", "No", "NO", "n", "N", "false", "False", "FALSE", "f", "")
+        ],
     ],
 )
+# fmt: on
 def test_str2bool_ok(val, expected):
     assert str2bool(val) is expected
 
 
+# fmt: off
 @pytest.mark.parametrize(
     "val",
     [
@@ -151,11 +166,13 @@ def test_str2bool_ok(val, expected):
         pytest.param("tru",   id="partial"),
     ],
 )
+# fmt: on
 def test_str2bool_valueerror(val):
     with pytest.raises(ValueError):
         str2bool(val)
 
 
+# fmt: off
 @pytest.mark.parametrize(
     "val",
     [
@@ -165,6 +182,7 @@ def test_str2bool_valueerror(val):
         pytest.param(["x"], id="list"),
     ],
 )
+# fmt: on
 def test_str2bool_typeerror(val):
     with pytest.raises(TypeError):
         str2bool(val)

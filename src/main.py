@@ -24,9 +24,9 @@ log = logging.getLogger("spoty_lls")
 
 def main() -> None:
     with SpotifyClient(
-            client_id=c.CLIENT_ID,
-            client_secret=c.CLIENT_SECRET,
-            refresh_token=c.REFRESH_TOKEN,
+        client_id=c.CLIENT_ID,
+        client_secret=c.CLIENT_SECRET,
+        refresh_token=c.REFRESH_TOKEN,
     ) as client:
         user_id = client.current_user_id()
         log.debug("get current user id: %s", user_id)

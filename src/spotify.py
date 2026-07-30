@@ -54,11 +54,10 @@ R = t.TypeVar("R")
 
 
 def retry(
-        max_attempts: int = c.MAX_RETRIES,
-        base_delay: int = c.RETRY_DELAY,
-        max_wait: int = c.MAX_RETRY_WAIT,
+    max_attempts: int = c.MAX_RETRIES,
+    base_delay: int = c.RETRY_DELAY,
+    max_wait: int = c.MAX_RETRY_WAIT,
 ) -> Callable[[Callable[P, R]], Callable[P, R]]:
-
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
@@ -77,7 +76,11 @@ def retry(
 
                     log.warning(
                         "%s failed (%s); retry %d/%d in %ds",
-                        func.__name__, e, attempt, max_attempts, wait,
+                        func.__name__,
+                        e,
+                        attempt,
+                        max_attempts,
+                        wait,
                     )
 
                     time.sleep(wait)
@@ -87,7 +90,9 @@ def retry(
 
                     log.warning(
                         "%s network error; retry %d/%d",
-                        func.__name__, attempt, max_attempts,
+                        func.__name__,
+                        attempt,
+                        max_attempts,
                     )
 
                     time.sleep(base_delay)
@@ -100,7 +105,6 @@ def retry(
 
 
 def reauth_on_expiry(func: Callable[P, R]) -> Callable[P, R]:
-
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         client = args[0]
@@ -117,12 +121,11 @@ def reauth_on_expiry(func: Callable[P, R]) -> Callable[P, R]:
 
 
 class SpotifyClient:
-
     def __init__(
-            self,
-            client_id: str,
-            client_secret: str,
-            refresh_token: str,
+        self,
+        client_id: str,
+        client_secret: str,
+        refresh_token: str,
     ) -> None:
         self._client_id = client_id
         self._client_secret = client_secret
@@ -134,9 +137,7 @@ class SpotifyClient:
         self._token: str | None = None
 
     def authenticate(self) -> None:
-        auth = base64.b64encode(
-            f"{self._client_id}:{self._client_secret}".encode()
-        ).decode()
+        auth = base64.b64encode(f"{self._client_id}:{self._client_secret}".encode()).decode()
 
         try:
             resp = requests.post(
@@ -193,10 +194,7 @@ class SpotifyClient:
     def find_playlist(self, name: str, owner_id: str) -> tuple[str, str | None] | None:
         for data in self._paginate(f"{c.API_BASE}/me/playlists?limit={c.PAGE}"):
             for pl in data.get("items", []):
-                if (
-                    pl.get("name") == name
-                    and pl.get("owner", {}).get("id") == owner_id
-                ):
+                if pl.get("name") == name and pl.get("owner", {}).get("id") == owner_id:
                     return pl["id"], pl.get("description")
 
         return None
@@ -217,15 +215,16 @@ class SpotifyClient:
         return playlist_id
 
     def change_details(
-            self,
-            playlist_id: str,
-            *,
-            name: t.Optional[str] = None,
-            description: t.Optional[str] = None,
-            public: t.Optional[bool] = None,
+        self,
+        playlist_id: str,
+        *,
+        name: t.Optional[str] = None,
+        description: t.Optional[str] = None,
+        public: t.Optional[bool] = None,
     ) -> None:
         body = {
-            k: v for k, v in (
+            k: v
+            for k, v in (
                 ("name", name),
                 ("description", description),
                 ("public", public),
@@ -245,13 +244,13 @@ class SpotifyClient:
         resp = self._request(
             "PUT",
             f"{c.API_BASE}/playlists/{playlist_id}/tracks",
-            data={"uris": uris[:c.BATCH]},
+            data={"uris": uris[: c.BATCH]},
         )
 
         if snapshot := resp.get("snapshot_id"):
             log.info("replace_tracks snapshot_id=%s", snapshot)
 
-        for chunk in batched(uris[c.BATCH:], c.BATCH):
+        for chunk in batched(uris[c.BATCH :], c.BATCH):
             self._request(
                 "POST",
                 f"{c.API_BASE}/playlists/{playlist_id}/tracks",
@@ -267,9 +266,7 @@ class SpotifyClient:
         if self._token is None:
             raise SpotifyError("client not authenticated")
 
-        resp = self._session.request(
-            method, url, json=data, timeout=c.REQUEST_TIMEOUT
-        )
+        resp = self._session.request(method, url, json=data, timeout=c.REQUEST_TIMEOUT)
 
         code = resp.status_code
         if code == 401:

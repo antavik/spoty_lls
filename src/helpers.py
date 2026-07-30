@@ -26,16 +26,15 @@ def build_description(count: int, digest: str) -> str:
 
 
 class _StrToBool:
-
-    _true_vals = {'1', 'yes', 'Yes', 'YES', 'y', 'Y', 'true', 'True', 'TRUE', 't'}
-    _false_vals = {'0', 'no', 'No', 'NO', 'n', 'N', 'false', 'False', 'FALSE', 'f', ''}
+    _true_vals = {"1", "yes", "Yes", "YES", "y", "Y", "true", "True", "TRUE", "t"}
+    _false_vals = {"0", "no", "No", "NO", "n", "N", "false", "False", "FALSE", "f", ""}
 
     def __call__(self, v: str) -> bool:
         if isinstance(v, bool):
             return v
 
         if not isinstance(v, str):
-            raise TypeError('Invalid data type to cast')
+            raise TypeError("Invalid data type to cast")
 
         v = v.strip()
 
@@ -44,7 +43,7 @@ class _StrToBool:
         elif v in self._false_vals:
             return False
         else:
-            raise ValueError('Unsupported string value for common notation')
+            raise ValueError("Unsupported string value for common notation")
 
 
 str2bool = _StrToBool()
