@@ -19,12 +19,14 @@ MAX_RETRY_WAIT = 300  # max seconds to wait on 429 (capped Retry-After)
 REQUEST_TIMEOUT = 15  # seconds per HTTP request
 
 # OAuth scopes required by this application
+# fmt: off
 SCOPES = (
     "user-library-read "
     "playlist-read-private "
     "playlist-modify-private "
     "playlist-modify-public"
 )
+# fmt: on
 
 # Other
 PLAYLIST_NAME = "Last Liked"

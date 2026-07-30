@@ -1,7 +1,6 @@
 import hashlib
 import re
-
-from datetime import datetime, UTC
+from datetime import UTC, datetime
 
 _HASH_RE = re.compile(r"\[#([0-9a-f]{12})\]")
 

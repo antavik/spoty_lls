@@ -23,3 +23,4 @@ lint: build-test
 
 fmt: build-test
 	docker run --rm -v $(PWD):/work -w /work $(IMAGE)-test ruff format .
+	docker run --rm -v $(PWD):/work -w /work $(IMAGE)-test ruff check --fix .

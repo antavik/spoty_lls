@@ -9,10 +9,9 @@ import logging
 import sys
 
 import config as c
-
-from spotify import SpotifyClient
-from helpers import build_description, compute_uris_hash, parse_hash
 from alerting import notify_telegram
+from helpers import build_description, compute_uris_hash, parse_hash
+from spotify import SpotifyClient
 
 logging.basicConfig(
     level=logging.DEBUG if c.DEV_MODE else logging.INFO,
