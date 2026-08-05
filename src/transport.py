@@ -29,10 +29,11 @@ class RequestsTransport:
         *,
         headers: t.Optional[dict] = None,
         json: t.Optional[dict] = None,
+        data: t.Optional[dict] = None,
         timeout: t.Optional[int] = None,
     ) -> Response:
         try:
-            response = self._session.request(method, url, headers=headers, json=json, timeout=timeout)
+            response = self._session.request(method, url, headers=headers, json=json, data=data, timeout=timeout)
             response.raise_for_status()
         except requests.RequestException as e:
             raise TransportError(str(e)) from e
@@ -51,10 +52,11 @@ class RequestsTransport:
         *,
         headers: t.Optional[dict] = None,
         json: t.Optional[dict] = None,
+        data: t.Optional[dict] = None,
         timeout: t.Optional[int] = None,
     ) -> Response:
         try:
-            response = requests.request(method, url, headers=headers, json=json, timeout=timeout)
+            response = requests.request(method, url, headers=headers, json=json, data=data, timeout=timeout)
             response.raise_for_status()
         except requests.RequestException as e:
             raise TransportError(str(e)) from e

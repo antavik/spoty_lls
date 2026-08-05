@@ -135,8 +135,11 @@ class SpotifyClient:
             response = self._transport.raw_request(
                 "POST",
                 c.TOKEN_URL,
-                headers={"Authorization": f"Basic {auth}"},
-                json={
+                headers={
+                    "Authorization": f"Basic {auth}",
+                    "Content-Type": "application/x-www-form-urlencoded",
+                },
+                data={
                     "grant_type": "refresh_token",
                     "refresh_token": self._refresh_token,
                 },
