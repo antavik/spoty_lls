@@ -1,6 +1,6 @@
 import base64
-import json
 import functools
+import json
 import logging
 import time
 import typing as t
@@ -8,7 +8,7 @@ from collections.abc import Callable, Iterator
 from itertools import batched
 
 import config as c
-from transport import Response, RequestsTransport, TransportError
+from transport import RequestsTransport, TransportError
 
 log = logging.getLogger("spoty_lls.spotify")
 
