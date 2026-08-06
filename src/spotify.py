@@ -96,7 +96,7 @@ def retry(
     return decorator
 
 
-def reauth_on_expiry(func: Callable[P, R]) -> Callable[P, R]:
+def reauth_on_expiry[P, R](func: Callable[P, R]) -> Callable[P, R]:
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         client = args[0]
