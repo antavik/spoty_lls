@@ -4,7 +4,6 @@ import json
 import logging
 import time
 import typing as t
-from collections.abc import Callable, Iterator
 from itertools import batched
 
 import config as c
@@ -49,8 +48,9 @@ def retry(
     max_attempts: int = c.MAX_RETRIES,
     base_delay: int = c.RETRY_DELAY,
     max_wait: int = c.MAX_RETRY_WAIT,
-) -> Callable[[Callable[P, R]], Callable[P, R]]:
-    def decorator(func: Callable[P, R]) -> Callable[P, R]:
+) -> t.Callable[[t.Callable[P, R]], t.Callable[P, R]]:
+    def decorator(func: t.Callable[P, R]) -> t.Callable[P, R]:
+
         @functools.wraps(func)
         def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
             attempt = 1
@@ -96,7 +96,8 @@ def retry(
     return decorator
 
 
-def reauth_on_expiry[P, R](func: Callable[P, R]) -> Callable[P, R]:
+def reauth_on_expiry[P, R](func: t.Callable[P, R]) -> t.Callable[P, R]:
+
     @functools.wraps(func)
     def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
         client = args[0]
@@ -290,7 +291,7 @@ class SpotifyClient:
         except ValueError as e:
             raise SpotifyError(f"{method} {url} -> invalid JSON response") from e
 
-    def _paginate(self, url: str) -> Iterator[dict]:
+    def _paginate(self, url: str) -> t.Iterator[dict]:
         while url:
             data = self._request("GET", url)
 
