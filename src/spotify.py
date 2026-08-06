@@ -75,7 +75,8 @@ def retry(
                         wait,
                     )
 
-                    time.sleep(wait)
+                    if wait > 0:
+                        time.sleep(wait)
                 except TransportError as e:
                     if attempt >= max_attempts:
                         raise SpotifyError(f"network error: {e}") from None
@@ -94,23 +95,6 @@ def retry(
         return wrapper
 
     return decorator
-
-
-def reauth_on_expiry[P, R](func: t.Callable[P, R]) -> t.Callable[P, R]:
-
-    @functools.wraps(func)
-    def wrapper(*args: P.args, **kwargs: P.kwargs) -> R:
-        client = args[0]
-        try:
-            return func(*args, **kwargs)
-        except AuthExpiredError:
-            log.info("401 received; refreshing token and retrying once")
-
-            client.authenticate()
-
-            return func(*args, **kwargs)
-
-    return wrapper
 
 
 class SpotifyClient:
@@ -257,7 +241,6 @@ class SpotifyClient:
     def close(self) -> None:
         self._transport.close()
 
-    @reauth_on_expiry
     @retry()
     def _request(self, method: str, url: str, data: dict | None = None) -> dict:
         if self._token is None:
@@ -267,7 +250,9 @@ class SpotifyClient:
 
         code = resp.status_code
         if code == 401:
-            raise AuthExpiredError(f"{method} {url} -> HTTP 401")
+            self.authenticate()
+
+            raise RetryableError("retrying after token refresh", retry_after=0)
 
         if code == 429:
             try:
