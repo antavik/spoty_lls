@@ -1,27 +1,17 @@
-FROM python:3.13-slim AS base
+FROM golang:1.27 AS build
 
-ENV PYTHONUNBUFFERED=1
+WORKDIR /src
 
-WORKDIR /app
+COPY go.mod ./
+COPY cmd/ cmd/
+COPY internal/ internal/
 
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/spoty_lls ./cmd/spoty_lls \
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/get_token ./cmd/get_token
 
-COPY src/ ./
+FROM gcr.io/distroless/static-debian12:nonroot
 
-FROM base AS test
+COPY --from=build /out/spoty_lls /spoty_lls
+COPY --from=build /out/get_token /get_token
 
-ENV PYTHONPATH=/app
-
-COPY requirements-dev.txt .
-RUN pip install --no-cache-dir -r requirements-dev.txt
-
-COPY pyproject.toml .
-COPY tests/ ./tests/
-
-FROM base AS prod
-
-RUN useradd -m app
-USER app
-
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["/spoty_lls"]
