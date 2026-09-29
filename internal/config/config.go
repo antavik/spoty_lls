@@ -70,13 +70,13 @@ func Load() (Config, error) {
 	}
 
 	likedLimit := DefaultLikedLimit
-	if raw := os.Getenv("LIKED_LIMIT"); raw != "" {
+	if raw := os.Getenv("SPOTIFY_LIKED_LIMIT"); raw != "" {
 		n, err := strconv.Atoi(raw)
 		if err != nil {
-			return Config{}, fmt.Errorf("invalid LIKED_LIMIT: %w", err)
+			return Config{}, fmt.Errorf("invalid SPOTIFY_LIKED_LIMIT: %w", err)
 		}
 		if n <= 0 {
-			return Config{}, fmt.Errorf("invalid LIKED_LIMIT: %d must be a positive integer", n)
+			return Config{}, fmt.Errorf("invalid SPOTIFY_LIKED_LIMIT: %d must be a positive integer", n)
 		}
 		likedLimit = n
 	}

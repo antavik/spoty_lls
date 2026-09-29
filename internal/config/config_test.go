@@ -16,7 +16,7 @@ func clearSpotifyEnv(t *testing.T) {
 	t.Setenv("DEV_MODE", "")
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	t.Setenv("TELEGRAM_CHAT_ID", "")
-	t.Setenv("LIKED_LIMIT", "")
+	t.Setenv("SPOTIFY_LIKED_LIMIT", "")
 }
 
 func TestLoadRequired(t *testing.T) {
@@ -154,7 +154,7 @@ func TestLoadOptional(t *testing.T) {
 func TestLoadLikedLimit(t *testing.T) {
 	cases := []struct {
 		name    string
-		set     bool // whether LIKED_LIMIT is set at all (false = unset)
+		set     bool // whether SPOTIFY_LIKED_LIMIT is set at all (false = unset)
 		value   string
 		want    int
 		wantErr bool
@@ -173,30 +173,30 @@ func TestLoadLikedLimit(t *testing.T) {
 			t.Setenv("SPOTIFY_CLIENT_ID", "clientid123")
 			t.Setenv("SPOTIFY_CLIENT_SECRET", "secret123")
 			if tc.set {
-				t.Setenv("LIKED_LIMIT", tc.value)
+				t.Setenv("SPOTIFY_LIKED_LIMIT", tc.value)
 			} else {
 				// t.Setenv in clearSpotifyEnv registered restore-on-cleanup;
 				// unset for this subtest only.
-				if err := os.Unsetenv("LIKED_LIMIT"); err != nil {
-					t.Fatalf("os.Unsetenv(LIKED_LIMIT): %v", err)
+				if err := os.Unsetenv("SPOTIFY_LIKED_LIMIT"); err != nil {
+					t.Fatalf("os.Unsetenv(SPOTIFY_LIKED_LIMIT): %v", err)
 				}
 			}
 
 			cfg, err := Load()
 			if tc.wantErr {
 				if err == nil {
-					t.Fatalf("Load() with LIKED_LIMIT=%q returned nil error, want non-nil", tc.value)
+					t.Fatalf("Load() with SPOTIFY_LIKED_LIMIT=%q returned nil error, want non-nil", tc.value)
 				}
-				if !strings.Contains(err.Error(), "LIKED_LIMIT") {
-					t.Errorf("Load() error = %q, want it to mention %q", err.Error(), "LIKED_LIMIT")
+				if !strings.Contains(err.Error(), "SPOTIFY_LIKED_LIMIT") {
+					t.Errorf("Load() error = %q, want it to mention %q", err.Error(), "SPOTIFY_LIKED_LIMIT")
 				}
 				return
 			}
 			if err != nil {
-				t.Fatalf("Load() with LIKED_LIMIT=%q returned unexpected error: %v", tc.value, err)
+				t.Fatalf("Load() with SPOTIFY_LIKED_LIMIT=%q returned unexpected error: %v", tc.value, err)
 			}
 			if cfg.LikedLimit != tc.want {
-				t.Errorf("Load() with LIKED_LIMIT=%q -> cfg.LikedLimit = %d, want %d", tc.value, cfg.LikedLimit, tc.want)
+				t.Errorf("Load() with SPOTIFY_LIKED_LIMIT=%q -> cfg.LikedLimit = %d, want %d", tc.value, cfg.LikedLimit, tc.want)
 			}
 		})
 	}

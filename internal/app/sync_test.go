@@ -50,7 +50,7 @@ type fakeClient struct {
 var _ SpotifyAPI = (*fakeClient)(nil)
 
 // testCfg builds a Config with the default liked limit for tests that don't
-// exercise LIKED_LIMIT specifically.
+// exercise SPOTIFY_LIKED_LIMIT specifically.
 func testCfg() config.Config {
 	return config.Config{LikedLimit: config.DefaultLikedLimit}
 }
