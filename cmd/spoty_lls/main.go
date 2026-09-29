@@ -32,7 +32,7 @@ func run() int {
 	notify := func(text string) {
 		app.NotifyTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, text)
 	}
-	if err := app.Run(client, notify); err != nil {
+	if err := app.Run(cfg, client, notify); err != nil {
 		return 1
 	}
 	return 0

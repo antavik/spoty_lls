@@ -18,8 +18,8 @@ type SpotifyAPI interface {
 	ChangeDetails(playlistID, description string) error
 }
 
-func Run(client SpotifyAPI, notify func(string)) error {
-	if err := sync(client); err != nil {
+func Run(cfg config.Config, client SpotifyAPI, notify func(string)) error {
+	if err := sync(cfg, client); err != nil {
 		msg := fmt.Sprintf("spoty_lls failed: %v", err)
 		notify(msg)
 		log.Print(msg)
@@ -28,7 +28,7 @@ func Run(client SpotifyAPI, notify func(string)) error {
 	return nil
 }
 
-func sync(client SpotifyAPI) error {
+func sync(cfg config.Config, client SpotifyAPI) error {
 	if err := client.Authenticate(); err != nil {
 		return fmt.Errorf("authenticate: %w", err)
 	}
@@ -39,7 +39,7 @@ func sync(client SpotifyAPI) error {
 	}
 	config.Debugf("get current user id: %s", userID)
 
-	liked, err := client.LikedTrackURIs(config.LikedLimit)
+	liked, err := client.LikedTrackURIs(cfg.LikedLimit)
 	if err != nil {
 		return err
 	}

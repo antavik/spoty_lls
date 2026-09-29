@@ -4,7 +4,7 @@ Guidance for code agents working in this repo.
 
 ## What this project is
 
-`spoty_lls` ("Spotify Last Liked Sync") is a small, single-purpose **Go** job that keeps a Spotify playlist named **"Last Liked"** in sync with the user's **100 most recently liked songs**. It runs **once and exits** — designed to be triggered on a schedule (cron / Kubernetes CronJob) as a one-shot container.
+`spoty_lls` ("Spotify Last Liked Sync") is a small, single-purpose **Go** job that keeps a Spotify playlist named **"Last Liked"** in sync with the user's **most recently liked songs** (default 100, configurable via `SPOTIFY_LIKED_LIMIT`). It runs **once and exits** — designed to be triggered on a schedule (cron / Kubernetes CronJob) as a one-shot container.
 
 Key design goals:
 - **Zero dependencies**: Go stdlib only (Go 1.27). No third-party modules — keep it that way.
@@ -22,7 +22,7 @@ Key design goals:
 3. `app.Run(cfg, client, notify)`:
    - `Authenticate()` — refresh-token grant → Bearer token.
    - `CurrentUserID()`.
-   - `LikedTrackURIs(100)` — most-recent first, paginated.
+   - `LikedTrackURIs(cfg.LikedLimit)` (default 100) — most-recent first, paginated.
    - Empty liked list → log warning, exit success, **no playlist calls at all**.
    - `helpers.ComputeURIsHash(liked)` → 12-hex digest.
    - `FindPlaylist("Last Liked", userID)`; not found → `CreatePlaylist` (private).
@@ -51,12 +51,12 @@ Key design goals:
 - **Other 4xx** → immediate error, **no retry**.
 - 2xx empty body → empty map; invalid JSON → error.
 
-Spotify paging/batching (`config`): `Page=50`, `Batch=100`, `LikedLimit=100`.
+Spotify paging/batching (`config`): `Page=50`, `Batch=100`, `DefaultLikedLimit=100` (overridable via `SPOTIFY_LIKED_LIMIT`).
 
 ## Configuration (environment variables)
 
 Required: `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_REFRESH_TOKEN` (obtained once via `make token`).
-Optional: `SPOTIFY_REDIRECT_URI` (default `http://127.0.0.1:8888/callback`), `DEV_MODE` (truthy → debug logging), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+Optional: `SPOTIFY_REDIRECT_URI` (default `http://127.0.0.1:8888/callback`), `SPOTIFY_LIKED_LIMIT` (positive integer, default 100; invalid/non-positive → `Load()` error), `DEV_MODE` (truthy → debug logging), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
 `.env.example` documents the required vars. Copy to `.env` for local runs.
 
