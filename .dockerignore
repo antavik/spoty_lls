@@ -1,7 +1,15 @@
 .env
 .env.*
+!.env.example
 
-README.md
-__pycache__/
-*.pyc
 .git/
+.opencode/
+.codegraph/
+
+Makefile
+Dockerfile
+.dockerignore
+.gitignore
+README.md
+AGENTS.md
+*_test.go

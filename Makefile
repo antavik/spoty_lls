@@ -1,26 +1,26 @@
 IMAGE    := spoty-lls
 ENV_FILE := .env
 
-.PHONY: build build-test run token test lint fmt
+.PHONY: build run token test lint fmt
 
 build:
 	docker build -t $(IMAGE) .
 
-build-test:
-	docker build --target test -t $(IMAGE)-test .
-
 run: build
-	docker run --env-file $(ENV_FILE) $(IMAGE)
+	docker run --rm --env-file $(ENV_FILE) $(IMAGE)
 
 token: build
-	docker run -it --env-file $(ENV_FILE) -p 8888:8888 --entrypoint python $(IMAGE) get_token.py
+	docker run -it --rm --env-file $(ENV_FILE) --entrypoint /get_token $(IMAGE)
 
-test: build-test
-	docker run --rm $(IMAGE)-test pytest
+test:
+	go test ./...
 
-lint: build-test
-	docker run --rm $(IMAGE)-test ruff check .
+lint:
+	go vet ./...
+	@unformatted=$$(gofmt -l .); \
+	if [ -n "$$unformatted" ]; then \
+		echo "gofmt needed for:"; echo "$$unformatted"; exit 1; \
+	fi
 
-fmt: build-test
-	docker run --rm -v $(PWD):/work -w /work $(IMAGE)-test ruff format .
-	docker run --rm -v $(PWD):/work -w /work $(IMAGE)-test ruff check --fix .
+fmt:
+	gofmt -w .
