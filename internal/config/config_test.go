@@ -1,6 +1,7 @@
 package config
 
 import (
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -15,6 +16,7 @@ func clearSpotifyEnv(t *testing.T) {
 	t.Setenv("DEV_MODE", "")
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	t.Setenv("TELEGRAM_CHAT_ID", "")
+	t.Setenv("LIKED_LIMIT", "")
 }
 
 func TestLoadRequired(t *testing.T) {
@@ -149,12 +151,63 @@ func TestLoadOptional(t *testing.T) {
 	}
 }
 
+func TestLoadLikedLimit(t *testing.T) {
+	cases := []struct {
+		name    string
+		set     bool // whether LIKED_LIMIT is set at all (false = unset)
+		value   string
+		want    int
+		wantErr bool
+	}{
+		{"unset defaults to DefaultLikedLimit", false, "", DefaultLikedLimit, false},
+		{"empty defaults to DefaultLikedLimit", true, "", DefaultLikedLimit, false},
+		{"valid positive integer", true, "50", 50, false},
+		{"non-numeric errors", true, "abc", 0, true},
+		{"zero errors", true, "0", 0, true},
+		{"negative errors", true, "-5", 0, true},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearSpotifyEnv(t)
+			t.Setenv("SPOTIFY_CLIENT_ID", "clientid123")
+			t.Setenv("SPOTIFY_CLIENT_SECRET", "secret123")
+			if tc.set {
+				t.Setenv("LIKED_LIMIT", tc.value)
+			} else {
+				// t.Setenv in clearSpotifyEnv registered restore-on-cleanup;
+				// unset for this subtest only.
+				if err := os.Unsetenv("LIKED_LIMIT"); err != nil {
+					t.Fatalf("os.Unsetenv(LIKED_LIMIT): %v", err)
+				}
+			}
+
+			cfg, err := Load()
+			if tc.wantErr {
+				if err == nil {
+					t.Fatalf("Load() with LIKED_LIMIT=%q returned nil error, want non-nil", tc.value)
+				}
+				if !strings.Contains(err.Error(), "LIKED_LIMIT") {
+					t.Errorf("Load() error = %q, want it to mention %q", err.Error(), "LIKED_LIMIT")
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("Load() with LIKED_LIMIT=%q returned unexpected error: %v", tc.value, err)
+			}
+			if cfg.LikedLimit != tc.want {
+				t.Errorf("Load() with LIKED_LIMIT=%q -> cfg.LikedLimit = %d, want %d", tc.value, cfg.LikedLimit, tc.want)
+			}
+		})
+	}
+}
+
 func TestConstants(t *testing.T) {
 	if PlaylistName != "Last Liked" {
 		t.Errorf("PlaylistName = %q, want %q", PlaylistName, "Last Liked")
 	}
-	if LikedLimit != 100 {
-		t.Errorf("LikedLimit = %d, want 100", LikedLimit)
+	if DefaultLikedLimit != 100 {
+		t.Errorf("DefaultLikedLimit = %d, want 100", DefaultLikedLimit)
 	}
 	if Page != 50 {
 		t.Errorf("Page = %d, want 50", Page)

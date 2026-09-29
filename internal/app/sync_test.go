@@ -49,6 +49,12 @@ type fakeClient struct {
 
 var _ SpotifyAPI = (*fakeClient)(nil)
 
+// testCfg builds a Config with the default liked limit for tests that don't
+// exercise LIKED_LIMIT specifically.
+func testCfg() config.Config {
+	return config.Config{LikedLimit: config.DefaultLikedLimit}
+}
+
 func (f *fakeClient) Authenticate() error {
 	return f.authErr
 }
@@ -107,7 +113,7 @@ func TestRunLikedEmpty(t *testing.T) {
 	client := &fakeClient{userID: "user1", liked: []string{}}
 
 	notifyCalls := 0
-	err := Run(client, func(string) { notifyCalls++ })
+	err := Run(testCfg(), client, func(string) { notifyCalls++ })
 
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -143,7 +149,7 @@ func TestRunUnchanged(t *testing.T) {
 	}
 
 	notifyCalls := 0
-	err := Run(client, func(string) { notifyCalls++ })
+	err := Run(testCfg(), client, func(string) { notifyCalls++ })
 
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -192,7 +198,7 @@ func TestRunChanged(t *testing.T) {
 			}
 
 			notifyCalls := 0
-			err := Run(client, func(string) { notifyCalls++ })
+			err := Run(testCfg(), client, func(string) { notifyCalls++ })
 
 			if err != nil {
 				t.Fatalf("Run() error = %v, want nil", err)
@@ -241,7 +247,7 @@ func TestRunPlaylistMissing(t *testing.T) {
 	}
 
 	notifyCalls := 0
-	err := Run(client, func(string) { notifyCalls++ })
+	err := Run(testCfg(), client, func(string) { notifyCalls++ })
 
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -356,7 +362,7 @@ func TestRunNotifyOnFailure(t *testing.T) {
 			var notifyMsgs []string
 			notify := func(msg string) { notifyMsgs = append(notifyMsgs, msg) }
 
-			err := Run(client, notify)
+			err := Run(testCfg(), client, notify)
 
 			if err == nil {
 				t.Fatalf("Run() error = nil, want non-nil")
@@ -377,7 +383,7 @@ func TestRunNotifyOnFailure(t *testing.T) {
 func TestRunCallsLikedWithLimit(t *testing.T) {
 	client := &fakeClient{userID: "user1", liked: []string{}}
 
-	err := Run(client, func(string) {})
+	err := Run(testCfg(), client, func(string) {})
 
 	if err != nil {
 		t.Fatalf("Run() error = %v, want nil", err)
@@ -385,8 +391,25 @@ func TestRunCallsLikedWithLimit(t *testing.T) {
 	if !client.likedCalled {
 		t.Fatalf("LikedTrackURIs not called, want called")
 	}
-	if client.likedLimitGot != config.LikedLimit {
-		t.Errorf("LikedTrackURIs limit = %d, want %d (config.LikedLimit)", client.likedLimitGot, config.LikedLimit)
+	if client.likedLimitGot != config.DefaultLikedLimit {
+		t.Errorf("LikedTrackURIs limit = %d, want %d (config.DefaultLikedLimit)", client.likedLimitGot, config.DefaultLikedLimit)
+	}
+}
+
+func TestRunUsesCfgLikedLimit(t *testing.T) {
+	client := &fakeClient{userID: "user1", liked: []string{}}
+	cfg := config.Config{LikedLimit: 42}
+
+	err := Run(cfg, client, func(string) {})
+
+	if err != nil {
+		t.Fatalf("Run() error = %v, want nil", err)
+	}
+	if !client.likedCalled {
+		t.Fatalf("LikedTrackURIs not called, want called")
+	}
+	if client.likedLimitGot != 42 {
+		t.Errorf("LikedTrackURIs limit = %d, want 42 (cfg.LikedLimit)", client.likedLimitGot)
 	}
 }
 

@@ -1,6 +1,6 @@
 # spoty_lls — Spotify "Last Liked" playlist sync
 
-Keeps a playlist in sync with your 100 most recently liked songs.
+Keeps a playlist in sync with your most recently liked songs (100 by default, configurable via `LIKED_LIMIT`).
 Written in Go — **zero dependencies** (stdlib only), ships as a single static binary.
 
 ## 1. Create a Spotify app
@@ -72,6 +72,7 @@ spec:
 | `SPOTIFY_CLIENT_SECRET` | yes | — | Spotify app client secret |
 | `SPOTIFY_REFRESH_TOKEN` | yes (sync) | — | Obtained once via `make token` |
 | `SPOTIFY_REDIRECT_URI` | no | `http://127.0.0.1:8888/callback` | Must match Spotify app settings |
+| `LIKED_LIMIT` | no | `100` | How many recently liked songs to sync; must be a positive integer |
 | `DEV_MODE` | no | `0` | Truthy → debug logging |
 | `TELEGRAM_BOT_TOKEN` | no | — | Enables failure alerts |
 | `TELEGRAM_CHAT_ID` | no | — | Enables failure alerts |
@@ -80,8 +81,8 @@ spec:
 - Scopes used: `user-library-read`, `playlist-read-private`,
   `playlist-modify-private`, `playlist-modify-public`.
 - The playlist is created **private** if it doesn't exist.
-- Each run replaces the playlist with your 100 most recently liked songs,
-  preserving liked order (most-recent first).
+- Each run replaces the playlist with your `LIKED_LIMIT` (default 100) most
+  recently liked songs, preserving liked order (most-recent first).
 - Idempotent: the SHA-256 digest of the liked URIs is stored in the playlist
   description as `[#<12-hex>]`; unchanged digest → no API writes.
 - **Security: treat refresh token like a password. Anyone with it controls the Spotify account's library/playlists.**

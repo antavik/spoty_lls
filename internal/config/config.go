@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"time"
 
 	"spoty_lls/internal/helpers"
@@ -19,10 +20,10 @@ const (
 	PlaylistName       = "Last Liked"
 	DefaultRedirectURI = "http://127.0.0.1:8888/callback"
 
-	LikedLimit = 100
-	Page       = 50
-	Batch      = 100
-	MaxRetries = 3
+	DefaultLikedLimit = 100
+	Page              = 50
+	Batch             = 100
+	MaxRetries        = 3
 
 	RetryDelay      = 2 * time.Second
 	MaxRetryWait    = 300 * time.Second
@@ -44,6 +45,7 @@ type Config struct {
 	RefreshToken     string
 	RedirectURI      string
 	DevMode          bool
+	LikedLimit       int
 	TelegramBotToken string
 	TelegramChatID   string
 }
@@ -67,6 +69,18 @@ func Load() (Config, error) {
 		return Config{}, fmt.Errorf("invalid DEV_MODE: %w", err)
 	}
 
+	likedLimit := DefaultLikedLimit
+	if raw := os.Getenv("LIKED_LIMIT"); raw != "" {
+		n, err := strconv.Atoi(raw)
+		if err != nil {
+			return Config{}, fmt.Errorf("invalid LIKED_LIMIT: %w", err)
+		}
+		if n <= 0 {
+			return Config{}, fmt.Errorf("invalid LIKED_LIMIT: %d must be a positive integer", n)
+		}
+		likedLimit = n
+	}
+
 	redirectURI := os.Getenv("SPOTIFY_REDIRECT_URI")
 	if redirectURI == "" {
 		redirectURI = DefaultRedirectURI
@@ -78,6 +92,7 @@ func Load() (Config, error) {
 		RefreshToken:     os.Getenv("SPOTIFY_REFRESH_TOKEN"),
 		RedirectURI:      redirectURI,
 		DevMode:          devMode,
+		LikedLimit:       likedLimit,
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),
 		TelegramChatID:   os.Getenv("TELEGRAM_CHAT_ID"),
 	}, nil
