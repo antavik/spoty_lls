@@ -39,7 +39,19 @@ jobs:
         run: go vet ./...
 
       - name: go test
-        run: go test ./...
+        run: go test -coverprofile=coverage.out -covermode=atomic ./...
+
+      - name: coverage summary
+        run: |
+          go tool cover -func=coverage.out | tee coverage.txt
+          total=$(awk '/^total:/ {print $3}' coverage.txt)
+          echo "## Test coverage" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "Total: **${total}**" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat coverage.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
 
   docker:
     needs: lint-test
