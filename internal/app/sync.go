@@ -50,21 +50,21 @@ func sync(cfg config.Config, client SpotifyAPI) error {
 	config.Debugf("get %d liked tracks", len(liked))
 
 	digest := helpers.ComputeURIsHash(liked)
-	playlistID, description, found, err := client.FindPlaylist(config.PlaylistName, userID)
+	playlistID, description, found, err := client.FindPlaylist(cfg.PlaylistName, userID)
 	if err != nil {
 		return err
 	}
 
 	var storedHash string
 	if !found {
-		playlistID, err = client.CreatePlaylist(userID, config.PlaylistName)
+		playlistID, err = client.CreatePlaylist(userID, cfg.PlaylistName)
 		if err != nil {
 			return err
 		}
-		log.Printf("created playlist '%s' (%s)", config.PlaylistName, playlistID)
+		log.Printf("created playlist '%s' (%s)", cfg.PlaylistName, playlistID)
 	} else {
 		storedHash, _ = helpers.ParseHash(description)
-		config.Debugf("found playlist '%s' (%s)", config.PlaylistName, playlistID)
+		config.Debugf("found playlist '%s' (%s)", cfg.PlaylistName, playlistID)
 	}
 
 	if storedHash == digest {
@@ -75,12 +75,12 @@ func sync(cfg config.Config, client SpotifyAPI) error {
 	if err := client.ReplaceTracks(playlistID, liked); err != nil {
 		return err
 	}
-	config.Debugf("replaced tracks in playlist '%s' (%s)", config.PlaylistName, playlistID)
+	config.Debugf("replaced tracks in playlist '%s' (%s)", cfg.PlaylistName, playlistID)
 
 	if err := client.ChangeDetails(playlistID, helpers.BuildDescription(len(liked), digest)); err != nil {
 		return err
 	}
-	config.Debugf("updated playlist description for '%s' (%s)", config.PlaylistName, playlistID)
+	config.Debugf("updated playlist description for '%s' (%s)", cfg.PlaylistName, playlistID)
 
 	log.Print("done")
 	return nil

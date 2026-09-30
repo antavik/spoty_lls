@@ -17,6 +17,7 @@ func clearSpotifyEnv(t *testing.T) {
 	t.Setenv("TELEGRAM_BOT_TOKEN", "")
 	t.Setenv("TELEGRAM_CHAT_ID", "")
 	t.Setenv("SPOTIFY_LIKED_LIMIT", "")
+	t.Setenv("SPOTIFY_PLAYLIST_NAME", "")
 }
 
 func TestLoadRequired(t *testing.T) {
@@ -202,9 +203,47 @@ func TestLoadLikedLimit(t *testing.T) {
 	}
 }
 
+func TestLoadPlaylistName(t *testing.T) {
+	cases := []struct {
+		name  string
+		set   bool // whether SPOTIFY_PLAYLIST_NAME is set at all (false = unset)
+		value string
+		want  string
+	}{
+		{"unset defaults to DefaultPlaylistName", false, "", DefaultPlaylistName},
+		{"empty defaults to DefaultPlaylistName", true, "", DefaultPlaylistName},
+		{"custom name overrides default", true, "My Weekly Likes", "My Weekly Likes"},
+	}
+
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			clearSpotifyEnv(t)
+			t.Setenv("SPOTIFY_CLIENT_ID", "clientid123")
+			t.Setenv("SPOTIFY_CLIENT_SECRET", "secret123")
+			if tc.set {
+				t.Setenv("SPOTIFY_PLAYLIST_NAME", tc.value)
+			} else {
+				// t.Setenv in clearSpotifyEnv registered restore-on-cleanup;
+				// unset for this subtest only.
+				if err := os.Unsetenv("SPOTIFY_PLAYLIST_NAME"); err != nil {
+					t.Fatalf("os.Unsetenv(SPOTIFY_PLAYLIST_NAME): %v", err)
+				}
+			}
+
+			cfg, err := Load()
+			if err != nil {
+				t.Fatalf("Load() with SPOTIFY_PLAYLIST_NAME=%q returned unexpected error: %v", tc.value, err)
+			}
+			if cfg.PlaylistName != tc.want {
+				t.Errorf("Load() with SPOTIFY_PLAYLIST_NAME=%q -> cfg.PlaylistName = %q, want %q", tc.value, cfg.PlaylistName, tc.want)
+			}
+		})
+	}
+}
+
 func TestConstants(t *testing.T) {
-	if PlaylistName != "Last Liked" {
-		t.Errorf("PlaylistName = %q, want %q", PlaylistName, "Last Liked")
+	if DefaultPlaylistName != "Last Liked" {
+		t.Errorf("DefaultPlaylistName = %q, want %q", DefaultPlaylistName, "Last Liked")
 	}
 	if DefaultLikedLimit != 100 {
 		t.Errorf("DefaultLikedLimit = %d, want 100", DefaultLikedLimit)
