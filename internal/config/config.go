@@ -17,8 +17,8 @@ const (
 
 	Scopes = "user-library-read playlist-read-private playlist-modify-private playlist-modify-public"
 
-	PlaylistName       = "Last Liked"
-	DefaultRedirectURI = "http://127.0.0.1:8888/callback"
+	DefaultPlaylistName = "Last Liked"
+	DefaultRedirectURI  = "http://127.0.0.1:8888/callback"
 
 	DefaultLikedLimit = 100
 	Page              = 50
@@ -44,6 +44,7 @@ type Config struct {
 	ClientSecret     string
 	RefreshToken     string
 	RedirectURI      string
+	PlaylistName     string
 	DevMode          bool
 	LikedLimit       int
 	TelegramBotToken string
@@ -86,11 +87,17 @@ func Load() (Config, error) {
 		redirectURI = DefaultRedirectURI
 	}
 
+	playlistName := DefaultPlaylistName
+	if v := os.Getenv("SPOTIFY_PLAYLIST_NAME"); v != "" {
+		playlistName = v
+	}
+
 	return Config{
 		ClientID:         clientID,
 		ClientSecret:     clientSecret,
 		RefreshToken:     os.Getenv("SPOTIFY_REFRESH_TOKEN"),
 		RedirectURI:      redirectURI,
+		PlaylistName:     playlistName,
 		DevMode:          devMode,
 		LikedLimit:       likedLimit,
 		TelegramBotToken: os.Getenv("TELEGRAM_BOT_TOKEN"),

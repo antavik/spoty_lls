@@ -4,7 +4,7 @@ Guidance for code agents working in this repo.
 
 ## What this project is
 
-`spoty_lls` ("Spotify Last Liked Sync") is a small, single-purpose **Go** job that keeps a Spotify playlist named **"Last Liked"** in sync with the user's **most recently liked songs** (default 100, configurable via `SPOTIFY_LIKED_LIMIT`). It runs **once and exits** — designed to be triggered on a schedule (cron / Kubernetes CronJob) as a one-shot container.
+`spoty_lls` ("Spotify Last Liked Sync") is a small, single-purpose **Go** job that keeps a Spotify playlist named **"Last Liked"** (default; configurable via `SPOTIFY_PLAYLIST_NAME`) in sync with the user's **most recently liked songs** (default 100, configurable via `SPOTIFY_LIKED_LIMIT`). It runs **once and exits** — designed to be triggered on a schedule (cron / Kubernetes CronJob) as a one-shot container.
 
 Key design goals:
 - **Zero dependencies**: Go stdlib only (Go 1.27). No third-party modules — keep it that way.
@@ -25,7 +25,7 @@ Key design goals:
    - `LikedTrackURIs(cfg.LikedLimit)` (default 100) — most-recent first, paginated.
    - Empty liked list → log warning, exit success, **no playlist calls at all**.
    - `helpers.ComputeURIsHash(liked)` → 12-hex digest.
-   - `FindPlaylist("Last Liked", userID)`; not found → `CreatePlaylist` (private).
+   - `FindPlaylist(cfg.PlaylistName, userID)`; not found → `CreatePlaylist` (private).
    - Stored hash (parsed from description) == digest → skip.
    - Else `ReplaceTracks` (PUT first ≤100, POST remaining ≤100-chunks) + `ChangeDetails` (rewrite description with count/timestamp/hash).
 4. On any failure: `Run` calls `notify("spoty_lls failed: …")` (Telegram, best-effort) and returns the error; `run()` returns exit code 1.
@@ -56,7 +56,7 @@ Spotify paging/batching (`config`): `Page=50`, `Batch=100`, `DefaultLikedLimit=1
 ## Configuration (environment variables)
 
 Required: `SPOTIFY_CLIENT_ID`, `SPOTIFY_CLIENT_SECRET`, `SPOTIFY_REFRESH_TOKEN` (obtained once via `make token`).
-Optional: `SPOTIFY_REDIRECT_URI` (default `http://127.0.0.1:8888/callback`), `SPOTIFY_LIKED_LIMIT` (positive integer, default 100; invalid/non-positive → `Load()` error), `DEV_MODE` (truthy → debug logging), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
+Optional: `SPOTIFY_REDIRECT_URI` (default `http://127.0.0.1:8888/callback`), `SPOTIFY_LIKED_LIMIT` (positive integer, default 100; invalid/non-positive → `Load()` error), `DEV_MODE` (truthy → debug logging), `SPOTIFY_PLAYLIST_NAME` (default `Last Liked`; changing it targets/creates a different playlist — the old one is not migrated or deleted), `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`.
 
 `.env.example` documents the required vars. Copy to `.env` for local runs.
 

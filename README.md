@@ -73,6 +73,7 @@ spec:
 | `SPOTIFY_REFRESH_TOKEN` | yes (sync) | — | Obtained once via `make token` |
 | `SPOTIFY_REDIRECT_URI` | no | `http://127.0.0.1:8888/callback` | Must match Spotify app settings |
 | `SPOTIFY_LIKED_LIMIT` | no | `100` | How many recently liked songs to sync; must be a positive integer |
+| `SPOTIFY_PLAYLIST_NAME` | no | `Last Liked` | Name of the playlist to sync into |
 | `DEV_MODE` | no | `0` | Truthy → debug logging |
 | `TELEGRAM_BOT_TOKEN` | no | — | Enables failure alerts |
 | `TELEGRAM_CHAT_ID` | no | — | Enables failure alerts |
@@ -81,6 +82,8 @@ spec:
 - Scopes used: `user-library-read`, `playlist-read-private`,
   `playlist-modify-private`, `playlist-modify-public`.
 - The playlist is created **private** if it doesn't exist.
+- Changing `SPOTIFY_PLAYLIST_NAME` targets (or creates) a different playlist; the
+  previously used playlist is not migrated or deleted.
 - Each run replaces the playlist with your `SPOTIFY_LIKED_LIMIT` (default 100) most
   recently liked songs, preserving liked order (most-recent first).
 - Idempotent: the SHA-256 digest of the liked URIs is stored in the playlist

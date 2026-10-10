@@ -52,7 +52,10 @@ var _ SpotifyAPI = (*fakeClient)(nil)
 // testCfg builds a Config with the default liked limit for tests that don't
 // exercise SPOTIFY_LIKED_LIMIT specifically.
 func testCfg() config.Config {
-	return config.Config{LikedLimit: config.DefaultLikedLimit}
+	return config.Config{
+		LikedLimit:   config.DefaultLikedLimit,
+		PlaylistName: config.DefaultPlaylistName,
+	}
 }
 
 func (f *fakeClient) Authenticate() error {
@@ -157,8 +160,8 @@ func TestRunUnchanged(t *testing.T) {
 	if !client.findCalled {
 		t.Errorf("FindPlaylist not called, want called")
 	}
-	if client.findNameGot != config.PlaylistName {
-		t.Errorf("FindPlaylist name = %q, want %q", client.findNameGot, config.PlaylistName)
+	if client.findNameGot != config.DefaultPlaylistName {
+		t.Errorf("FindPlaylist name = %q, want %q", client.findNameGot, config.DefaultPlaylistName)
 	}
 	if client.findOwnerGot != "user1" {
 		t.Errorf("FindPlaylist owner = %q, want %q", client.findOwnerGot, "user1")
@@ -258,8 +261,8 @@ func TestRunPlaylistMissing(t *testing.T) {
 	if client.createOwnerGot != "user1" {
 		t.Errorf("CreatePlaylist owner = %q, want %q", client.createOwnerGot, "user1")
 	}
-	if client.createNameGot != config.PlaylistName {
-		t.Errorf("CreatePlaylist name = %q, want %q", client.createNameGot, config.PlaylistName)
+	if client.createNameGot != config.DefaultPlaylistName {
+		t.Errorf("CreatePlaylist name = %q, want %q", client.createNameGot, config.DefaultPlaylistName)
 	}
 	if !client.replaceCalled {
 		t.Fatalf("ReplaceTracks not called, want called")
@@ -411,6 +414,62 @@ func TestRunUsesCfgLikedLimit(t *testing.T) {
 	if client.likedLimitGot != 42 {
 		t.Errorf("LikedTrackURIs limit = %d, want 42 (cfg.LikedLimit)", client.likedLimitGot)
 	}
+}
+
+func TestRunUsesCfgPlaylistName(t *testing.T) {
+	const customName = "Custom Playlist"
+	liked := []string{"spotify:track:1", "spotify:track:2"}
+	cfg := config.Config{
+		LikedLimit:   config.DefaultLikedLimit,
+		PlaylistName: customName,
+	}
+
+	t.Run("found", func(t *testing.T) {
+		client := &fakeClient{
+			userID:    "user1",
+			liked:     liked,
+			findID:    "pl1",
+			findFound: true,
+		}
+
+		if err := Run(cfg, client, func(string) {}); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+		if !client.findCalled {
+			t.Fatalf("FindPlaylist not called, want called")
+		}
+		if client.findNameGot != customName {
+			t.Errorf("FindPlaylist name = %q, want %q (cfg.PlaylistName)", client.findNameGot, customName)
+		}
+		if client.createCalled {
+			t.Errorf("CreatePlaylist called, want not called when playlist found")
+		}
+	})
+
+	t.Run("not_found", func(t *testing.T) {
+		client := &fakeClient{
+			userID:    "user1",
+			liked:     liked,
+			findFound: false,
+			createID:  "newpl",
+		}
+
+		if err := Run(cfg, client, func(string) {}); err != nil {
+			t.Fatalf("Run() error = %v, want nil", err)
+		}
+		if !client.findCalled {
+			t.Fatalf("FindPlaylist not called, want called")
+		}
+		if client.findNameGot != customName {
+			t.Errorf("FindPlaylist name = %q, want %q (cfg.PlaylistName)", client.findNameGot, customName)
+		}
+		if !client.createCalled {
+			t.Fatalf("CreatePlaylist not called, want called when playlist not found")
+		}
+		if client.createNameGot != customName {
+			t.Errorf("CreatePlaylist name = %q, want %q (cfg.PlaylistName)", client.createNameGot, customName)
+		}
+	})
 }
 
 func TestNotifyTelegramNoop(t *testing.T) {
