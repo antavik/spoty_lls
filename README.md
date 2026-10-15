@@ -59,10 +59,22 @@ spec:
                     name: spoty-lls-secrets   # holds the SPOTIFY_* vars
 ```
 
-**Plain host cron running Docker:**
-```cron
-0 3 * * * docker run --rm --env-file /opt/spoty_lls/.env your-registry/spoty-lls:latest >> /var/log/spoty-lls.log 2>&1
+**Plain host cron running Docker** — use [`scripts/cron-run.sh`](scripts/cron-run.sh).
+It pulls the latest image (falls back to the cached one if the registry is
+unreachable), skips if a previous run is still going, runs the container
+hardened (`--read-only`, `--cap-drop ALL`, `no-new-privileges`) and exits with
+the container's exit code.
+```sh
+sudo install -d -m 700 /opt/spoty_lls
+sudo install -m 755 scripts/cron-run.sh /opt/spoty_lls/
+sudo install -m 600 .env /opt/spoty_lls/.env
+docker login ghcr.io   # once, PAT with read:packages (image is private)
 ```
+```cron
+0 3 * * * /opt/spoty_lls/cron-run.sh >> /var/log/spoty-lls.log 2>&1
+```
+Override defaults with `SPOTY_IMAGE` (default `ghcr.io/antavik/spoty_lls:latest`)
+and `SPOTY_ENV_FILE` (default `/opt/spoty_lls/.env`), e.g. in the crontab line.
 
 ## Environment variables
 

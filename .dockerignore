@@ -13,3 +13,4 @@ Dockerfile
 README.md
 AGENTS.md
 *_test.go
+scripts/
