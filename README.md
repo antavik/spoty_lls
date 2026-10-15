@@ -66,12 +66,11 @@ going, runs the container hardened (`--read-only`, `--cap-drop ALL`,
 `no-new-privileges`, `--init` for signal handling) and exits with the
 container's exit code.
 The job runs as root (the files below are root-only; docker access is
-root-equivalent anyway), so log in to the registry as root too:
+root-equivalent anyway). The GHCR image is public, so no `docker login` is needed:
 ```sh
 sudo install -d -m 700 /opt/spoty_lls
 sudo install -m 755 scripts/cron-run.sh /opt/spoty_lls/
 sudo install -m 600 .env /opt/spoty_lls/.env
-sudo docker login ghcr.io   # once, PAT with read:packages (image is private)
 echo '0 3 * * * root /opt/spoty_lls/cron-run.sh 2>&1 | logger -t spoty-lls' \
   | sudo tee /etc/cron.d/spoty-lls
 ```
