@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
-# Run the spoty_lls sync container once. Intended for host cron, e.g.:
-#   0 3 * * * /opt/spoty_lls/cron-run.sh >> /var/log/spoty-lls.log 2>&1
+# Run the spoty_lls sync container once. Intended for host cron, e.g.
+# /etc/cron.d/spoty-lls:
+#   0 3 * * * root /opt/spoty_lls/cron-run.sh 2>&1 | logger -t spoty-lls
 #
 # Overridable via env:
 #   SPOTY_IMAGE     image to run      (default: ghcr.io/antavik/spoty_lls:latest)
@@ -30,11 +31,20 @@ fi
 docker container rm "$NAME" >/dev/null 2>&1 || true
 
 # Pick up new releases; a registry hiccup should not block the sync.
-docker pull -q "$IMAGE" >/dev/null || log "pull failed, using cached image"
+old_id="$(docker image inspect -f '{{.Id}}' "$IMAGE" 2>/dev/null || true)"
+if docker pull -q "$IMAGE" >/dev/null; then
+  # Drop the superseded image so releases don't pile up on disk.
+  if [[ -n "$old_id" && "$old_id" != "$(docker image inspect -f '{{.Id}}' "$IMAGE")" ]]; then
+    docker image rm "$old_id" >/dev/null 2>&1 || true
+  fi
+else
+  log "pull failed, using cached image"
+fi
 
 log "start $IMAGE"
 rc=0
-docker run --rm --name "$NAME" \
+# --init: the Go binary as PID 1 would ignore SIGTERM/SIGINT.
+docker run --rm --init --name "$NAME" \
   --env-file "$ENV_FILE" \
   --read-only --cap-drop ALL --security-opt no-new-privileges \
   "$IMAGE" || rc=$?

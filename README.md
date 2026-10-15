@@ -61,9 +61,10 @@ spec:
 
 **Plain host cron running Docker** — use [`scripts/cron-run.sh`](scripts/cron-run.sh).
 It pulls the latest image (falls back to the cached one if the registry is
-unreachable), skips if a previous run is still going, runs the container
-hardened (`--read-only`, `--cap-drop ALL`, `no-new-privileges`) and exits with
-the container's exit code.
+unreachable, removes the superseded one), skips if a previous run is still
+going, runs the container hardened (`--read-only`, `--cap-drop ALL`,
+`no-new-privileges`, `--init` for signal handling) and exits with the
+container's exit code.
 The job runs as root (the files below are root-only; docker access is
 root-equivalent anyway), so log in to the registry as root too:
 ```sh

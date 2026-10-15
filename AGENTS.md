@@ -41,7 +41,7 @@ Key design goals:
 | `internal/helpers/helpers.go` | Pure functions: `ComputeURIsHash`, `ParseHash`, `BuildDescription`, `Str2Bool`. |
 | `internal/app/sync.go` | `Run()` orchestrator + `SpotifyAPI` interface (the test seam). |
 | `internal/app/alerting.go` | `NotifyTelegram` — best-effort, no-op if bot token/chat ID unset. |
-| `scripts/cron-run.sh` | Host-cron wrapper: pull image (cached fallback), skip if already running, hardened `docker run`, propagate exit code. Shellchecked in CI. |
+| `scripts/cron-run.sh` | Host-cron wrapper: pull image (cached fallback, old image removed), skip if already running (container name = lock), hardened `docker run --init`, propagate exit code. Shellchecked in CI. |
 
 ## Retry model (`internal/spotify/client.go`)
 
