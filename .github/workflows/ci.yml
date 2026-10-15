@@ -38,6 +38,9 @@ jobs:
       - name: go vet
         run: go vet ./...
 
+      - name: shellcheck
+        run: shellcheck scripts/*.sh
+
       - name: go test
         run: go test -coverprofile=coverage.out -covermode=atomic ./...
 
