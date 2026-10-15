@@ -22,10 +22,12 @@ if [[ ! -r "$ENV_FILE" ]]; then
 fi
 
 # Fixed container name doubles as a lock: an overlapping run fails fast.
-if [[ -n "$(docker ps -q --filter "name=^${NAME}$")" ]]; then
+if [[ "$(docker container inspect -f '{{.State.Running}}' "$NAME" 2>/dev/null)" == true ]]; then
   log "previous run still in progress, skipping"
   exit 0
 fi
+# Leftover from an interrupted run (e.g. daemon restart) would block the name.
+docker container rm "$NAME" >/dev/null 2>&1 || true
 
 # Pick up new releases; a registry hiccup should not block the sync.
 docker pull -q "$IMAGE" >/dev/null || log "pull failed, using cached image"
