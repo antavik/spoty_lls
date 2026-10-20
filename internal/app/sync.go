@@ -11,10 +11,10 @@ import (
 type SpotifyAPI interface {
 	Authenticate() error
 	CurrentUserID() (string, error)
-	LikedTrackURIs(limit int) ([]string, error)
+	LikedTracks(limit int) ([]helpers.Track, error)
 	FindPlaylist(name, ownerID string) (id, description string, found bool, err error)
 	CreatePlaylist(ownerID, name string) (string, error)
-	ReplaceTracks(playlistID string, uris []string) error
+	ReplaceTracks(playlistID string, tracks []helpers.Track) error
 	ChangeDetails(playlistID, description string) error
 }
 
@@ -39,7 +39,7 @@ func sync(cfg config.Config, client SpotifyAPI) error {
 	}
 	config.Debugf("get current user id: %s", userID)
 
-	liked, err := client.LikedTrackURIs(cfg.LikedLimit)
+	liked, err := client.LikedTracks(cfg.LikedLimit)
 	if err != nil {
 		return err
 	}
@@ -49,7 +49,7 @@ func sync(cfg config.Config, client SpotifyAPI) error {
 	}
 	config.Debugf("get %d liked tracks", len(liked))
 
-	digest := helpers.ComputeURIsHash(liked)
+	digest := helpers.ComputeTracksHash(liked)
 	playlistID, description, found, err := client.FindPlaylist(cfg.PlaylistName, userID)
 	if err != nil {
 		return err

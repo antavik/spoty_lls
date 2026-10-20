@@ -11,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"spoty_lls/internal/helpers"
 )
 
 // ---- test constants mirroring internal/config values (not imported: tests must
@@ -682,9 +684,9 @@ func TestCurrentUserID(t *testing.T) {
 	})
 }
 
-// ---- TestLikedTrackURIs ------------------------------------------------------
+// ---- TestLikedTracks ---------------------------------------------------------
 
-func TestLikedTrackURIs(t *testing.T) {
+func TestLikedTracks(t *testing.T) {
 	t.Run("follows pagination and collects uris in order", func(t *testing.T) {
 		var srv *httptest.Server
 		hits := 0
@@ -720,10 +722,11 @@ func TestLikedTrackURIs(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		uris, err := c.LikedTrackURIs(100)
+		tracks, err := c.LikedTracks(100)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		uris := helpers.URIs(tracks)
 		want := []string{"spotify:track:1", "spotify:track:2", "spotify:track:3", "spotify:track:4"}
 		if len(uris) != len(want) {
 			t.Fatalf("expected %d uris, got %d (%v)", len(want), len(uris), uris)
@@ -757,10 +760,11 @@ func TestLikedTrackURIs(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		uris, err := c.LikedTrackURIs(2)
+		tracks, err := c.LikedTracks(2)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		uris := helpers.URIs(tracks)
 		want := []string{"spotify:track:1", "spotify:track:2"}
 		if len(uris) != len(want) {
 			t.Fatalf("expected %d uris, got %d (%v)", len(want), len(uris), uris)
@@ -788,13 +792,46 @@ func TestLikedTrackURIs(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		uris, err := c.LikedTrackURIs(10)
+		tracks, err := c.LikedTracks(10)
 		if err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
+		uris := helpers.URIs(tracks)
 		want := []string{"spotify:track:x"}
 		if len(uris) != len(want) || uris[0] != want[0] {
 			t.Fatalf("expected %v, got %v", want, uris)
+		}
+	})
+
+	t.Run("collects title and artist names", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"items": [
+					{"track": {"uri": "spotify:track:1", "name": "Get Lucky",
+						"artists": [{"name": "Daft Punk"}, {"name": "Pharrell Williams"}, {}]}},
+					{"track": {"uri": "spotify:track:2"}}
+				],
+				"next": null
+			}`))
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		tracks, err := c.LikedTracks(10)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if len(tracks) != 2 {
+			t.Fatalf("expected 2 tracks, got %d (%v)", len(tracks), tracks)
+		}
+		got := tracks[0]
+		if got.Title != "Get Lucky" || strings.Join(got.Artists, "|") != "Daft Punk|Pharrell Williams" {
+			t.Fatalf("track[0]: expected Get Lucky by [Daft Punk Pharrell Williams], got %+v", got)
+		}
+		if tracks[1].Title != "" || len(tracks[1].Artists) != 0 {
+			t.Fatalf("track[1]: expected empty title and artists, got %+v", tracks[1])
 		}
 	})
 }
@@ -1047,8 +1084,16 @@ type urisBody struct {
 	Uris []string `json:"uris"`
 }
 
+func numberedTracks(n int) []helpers.Track {
+	tracks := make([]helpers.Track, n)
+	for i := range tracks {
+		tracks[i] = helpers.Track{URI: fmt.Sprintf("uri-%03d", i)}
+	}
+	return tracks
+}
+
 func TestReplaceTracks(t *testing.T) {
-	t.Run("empty uris makes no request", func(t *testing.T) {
+	t.Run("empty tracks makes no request", func(t *testing.T) {
 		rec := &requestRecorder{}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/playlists/pl1/tracks", rec.middleware(serveSteps([]respStep{
@@ -1059,19 +1104,16 @@ func TestReplaceTracks(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		if err := c.ReplaceTracks("pl1", []string{}); err != nil {
-			t.Fatalf("unexpected error for empty uris: %v", err)
+		if err := c.ReplaceTracks("pl1", []helpers.Track{}); err != nil {
+			t.Fatalf("unexpected error for empty tracks: %v", err)
 		}
 		if rec.count() != 0 {
-			t.Fatalf("expected zero requests for empty uris, got %d", rec.count())
+			t.Fatalf("expected zero requests for empty tracks, got %d", rec.count())
 		}
 	})
 
-	t.Run("exactly 100 uris uses a single PUT and no POST", func(t *testing.T) {
-		uris := make([]string, 100)
-		for i := range uris {
-			uris[i] = fmt.Sprintf("uri-%03d", i)
-		}
+	t.Run("exactly 100 tracks uses a single PUT and no POST", func(t *testing.T) {
+		tracks := numberedTracks(100)
 		rec := &requestRecorder{}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/playlists/pl1/tracks", rec.middleware(serveSteps([]respStep{
@@ -1082,24 +1124,21 @@ func TestReplaceTracks(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		if err := c.ReplaceTracks("pl1", uris); err != nil {
+		if err := c.ReplaceTracks("pl1", tracks); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 		reqs := rec.all()
 		if len(reqs) != 1 {
-			t.Fatalf("expected exactly 1 request for 100 uris, got %d", len(reqs))
+			t.Fatalf("expected exactly 1 request for 100 tracks, got %d", len(reqs))
 		}
 		if reqs[0].Method != http.MethodPut {
 			t.Fatalf("expected PUT, got %s", reqs[0].Method)
 		}
 	})
 
-	t.Run("more than 100 uris chunks with PUT then POSTs, preserving order", func(t *testing.T) {
+	t.Run("more than 100 tracks chunks with PUT then POSTs, preserving order", func(t *testing.T) {
 		total := 250
-		uris := make([]string, total)
-		for i := range uris {
-			uris[i] = fmt.Sprintf("uri-%03d", i)
-		}
+		tracks := numberedTracks(total)
 		rec := &requestRecorder{}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/playlists/pl1/tracks", rec.middleware(serveSteps([]respStep{
@@ -1110,7 +1149,7 @@ func TestReplaceTracks(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		if err := c.ReplaceTracks("pl1", uris); err != nil {
+		if err := c.ReplaceTracks("pl1", tracks); err != nil {
 			t.Fatalf("unexpected error: %v", err)
 		}
 
@@ -1147,9 +1186,9 @@ func TestReplaceTracks(t *testing.T) {
 		if len(got) != total {
 			t.Fatalf("expected %d total uris across chunks, got %d", total, len(got))
 		}
-		for i, u := range uris {
-			if got[i] != u {
-				t.Fatalf("uri[%d]: expected %q, got %q (order/completeness broken)", i, u, got[i])
+		for i, tr := range tracks {
+			if got[i] != tr.URI {
+				t.Fatalf("uri[%d]: expected %q, got %q (order/completeness broken)", i, tr.URI, got[i])
 			}
 		}
 	})
@@ -1167,10 +1206,7 @@ func TestReplaceTracks(t *testing.T) {
 
 		for _, tc := range cases {
 			t.Run(fmt.Sprintf("total_%d", tc.total), func(t *testing.T) {
-				uris := make([]string, tc.total)
-				for i := range uris {
-					uris[i] = fmt.Sprintf("uri-%03d", i)
-				}
+				tracks := numberedTracks(tc.total)
 				rec := &requestRecorder{}
 				mux := http.NewServeMux()
 				mux.HandleFunc("/playlists/pl1/tracks", rec.middleware(serveSteps([]respStep{
@@ -1181,8 +1217,8 @@ func TestReplaceTracks(t *testing.T) {
 
 				c, _ := newTestClient(t, srv)
 
-				if err := c.ReplaceTracks("pl1", uris); err != nil {
-					t.Fatalf("ReplaceTracks(%d uris) unexpected error: %v", tc.total, err)
+				if err := c.ReplaceTracks("pl1", tracks); err != nil {
+					t.Fatalf("ReplaceTracks(%d tracks) unexpected error: %v", tc.total, err)
 				}
 
 				reqs := rec.all()
@@ -1212,9 +1248,9 @@ func TestReplaceTracks(t *testing.T) {
 				if len(got) != tc.total {
 					t.Fatalf("expected %d total uris across chunks, got %d", tc.total, len(got))
 				}
-				for i, u := range uris {
-					if got[i] != u {
-						t.Fatalf("uri[%d]: expected %q, got %q", i, u, got[i])
+				for i, tr := range tracks {
+					if got[i] != tr.URI {
+						t.Fatalf("uri[%d]: expected %q, got %q", i, tr.URI, got[i])
 					}
 				}
 			})

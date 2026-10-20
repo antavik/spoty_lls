@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"spoty_lls/internal/config"
+	"spoty_lls/internal/helpers"
 )
 
 type Client struct {
@@ -94,8 +95,8 @@ func (c *Client) CurrentUserID() (string, error) {
 	return userID, nil
 }
 
-func (c *Client) LikedTrackURIs(limit int) ([]string, error) {
-	var uris []string
+func (c *Client) LikedTracks(limit int) ([]helpers.Track, error) {
+	var tracks []helpers.Track
 	nextURL := fmt.Sprintf("%s/me/tracks?limit=%d", c.apiBase, config.Page)
 
 	for nextURL != "" {
@@ -110,17 +111,26 @@ func (c *Client) LikedTrackURIs(limit int) ([]string, error) {
 			track, _ := m["track"].(map[string]any)
 			uri, _ := track["uri"].(string)
 			if uri != "" {
-				uris = append(uris, uri)
+				title, _ := track["name"].(string)
+				var names []string
+				artists, _ := track["artists"].([]any)
+				for _, a := range artists {
+					artist, _ := a.(map[string]any)
+					if name, _ := artist["name"].(string); name != "" {
+						names = append(names, name)
+					}
+				}
+				tracks = append(tracks, helpers.Track{URI: uri, Title: title, Artists: names})
 			}
-			if len(uris) >= limit {
-				return uris, nil
+			if len(tracks) >= limit {
+				return tracks, nil
 			}
 		}
 
 		nextURL, _ = data["next"].(string)
 	}
 
-	return uris, nil
+	return tracks, nil
 }
 
 func (c *Client) FindPlaylist(name, ownerID string) (id, description string, found bool, err error) {
@@ -179,15 +189,15 @@ func (c *Client) ChangeDetails(playlistID, description string) error {
 	return err
 }
 
-func (c *Client) ReplaceTracks(playlistID string, uris []string) error {
-	if len(uris) == 0 {
-		config.Debugf("replace_tracks called with empty uris - skipping")
+func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error {
+	if len(tracks) == 0 {
+		config.Debugf("replace_tracks called with empty tracks - skipping")
 		return nil
 	}
 
 	tracksURL := fmt.Sprintf("%s/playlists/%s/tracks", c.apiBase, playlistID)
 
-	result, err := c.do(http.MethodPut, tracksURL, map[string]any{"uris": uris[:min(len(uris), config.Batch)]})
+	result, err := c.do(http.MethodPut, tracksURL, map[string]any{"uris": helpers.URIs(tracks)[:min(len(tracks), config.Batch)]})
 	if err != nil {
 		return err
 	}
@@ -195,9 +205,9 @@ func (c *Client) ReplaceTracks(playlistID string, uris []string) error {
 		config.Debugf("replace_tracks snapshot_id=%s", snapshot)
 	}
 
-	for start := config.Batch; start < len(uris); start += config.Batch {
-		end := min(start+config.Batch, len(uris))
-		if _, err := c.do(http.MethodPost, tracksURL, map[string]any{"uris": uris[start:end]}); err != nil {
+	for start := config.Batch; start < len(tracks); start += config.Batch {
+		end := min(start+config.Batch, len(tracks))
+		if _, err := c.do(http.MethodPost, tracksURL, map[string]any{"uris": helpers.URIs(tracks)[start:end]}); err != nil {
 			return err
 		}
 	}

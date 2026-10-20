@@ -6,42 +6,81 @@ import (
 	"testing"
 )
 
-func TestComputeURIsHash(t *testing.T) {
+func TestComputeTracksHash(t *testing.T) {
 	cases := []struct {
-		name string
-		uris []string
-		want string
+		name   string
+		tracks []Track
+		want   string
 	}{
-		{"empty", []string{}, "e3b0c44298fc"},
-		{"single", []string{"spotify:track:abc"}, "9280d0947123"},
-		{"multiple", []string{"spotify:track:1", "spotify:track:2", "spotify:track:3"}, "80b4de5b99b7"},
-		{"unicode", []string{"spotify:track:é1"}, "27b7b5c15b6a"},
+		{"empty", []Track{}, "e3b0c44298fc"},
+		{"single", []Track{{URI: "spotify:track:1", Title: "One More Time", Artists: []string{"Daft Punk"}}}, "dce6739b29cf"},
+		{"multiple", []Track{
+			{URI: "spotify:track:1", Title: "One More Time", Artists: []string{"Daft Punk"}},
+			{URI: "spotify:track:2", Title: "Get Lucky", Artists: []string{"Daft Punk", "Pharrell Williams"}},
+			{URI: "spotify:track:3", Title: "Jóga", Artists: []string{"Björk"}},
+		}, "fffc5bbd5bf7"},
+		{"no artists", []Track{{URI: "spotify:track:1", Title: "Untitled"}}, "aa7c1ba6ff1b"},
 	}
 
 	hexRe := regexp.MustCompile(`^[0-9a-f]{12}$`)
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ComputeURIsHash(tc.uris)
+			got := ComputeTracksHash(tc.tracks)
 			if got != tc.want {
-				t.Errorf("ComputeURIsHash(%v) = %q, want %q", tc.uris, got, tc.want)
+				t.Errorf("ComputeTracksHash(%v) = %q, want %q", tc.tracks, got, tc.want)
 			}
 			if !hexRe.MatchString(got) {
-				t.Errorf("ComputeURIsHash(%v) = %q, want 12 lowercase hex chars", tc.uris, got)
+				t.Errorf("ComputeTracksHash(%v) = %q, want 12 lowercase hex chars", tc.tracks, got)
 			}
 		})
 	}
 }
 
-func TestComputeURIsHashOrderMatters(t *testing.T) {
-	uris := []string{"spotify:track:1", "spotify:track:2", "spotify:track:3"}
-	reversed := []string{"spotify:track:3", "spotify:track:2", "spotify:track:1"}
+func TestComputeTracksHashIgnoresURI(t *testing.T) {
+	a := []Track{{URI: "spotify:track:1", Title: "Song", Artists: []string{"Artist"}}}
+	b := []Track{{URI: "spotify:track:2", Title: "Song", Artists: []string{"Artist"}}}
 
-	got := ComputeURIsHash(uris)
-	gotReversed := ComputeURIsHash(reversed)
+	if got, gotB := ComputeTracksHash(a), ComputeTracksHash(b); got != gotB {
+		t.Errorf("expected same digest for same artist/title with different URIs, got %q and %q", got, gotB)
+	}
+}
+
+func TestComputeTracksHashChangesWithArtistOrTitle(t *testing.T) {
+	base := []Track{{Title: "Song", Artists: []string{"Artist"}}}
+	variants := map[string][]Track{
+		"title":        {{Title: "Other Song", Artists: []string{"Artist"}}},
+		"artist":       {{Title: "Song", Artists: []string{"Other Artist"}}},
+		"extra artist": {{Title: "Song", Artists: []string{"Artist", "Feat"}}},
+	}
+
+	got := ComputeTracksHash(base)
+	for name, v := range variants {
+		if ComputeTracksHash(v) == got {
+			t.Errorf("%s change: expected different digest, both got %q", name, got)
+		}
+	}
+}
+
+func TestComputeTracksHashOrderMatters(t *testing.T) {
+	tracks := []Track{{Title: "1", Artists: []string{"A"}}, {Title: "2", Artists: []string{"A"}}, {Title: "3", Artists: []string{"A"}}}
+	reversed := []Track{tracks[2], tracks[1], tracks[0]}
+
+	got := ComputeTracksHash(tracks)
+	gotReversed := ComputeTracksHash(reversed)
 
 	if got == gotReversed {
 		t.Errorf("expected different digests for reversed order, both got %q", got)
+	}
+}
+
+func TestURIs(t *testing.T) {
+	tracks := []Track{{URI: "spotify:track:1"}, {URI: "spotify:track:2"}}
+	want := []string{"spotify:track:1", "spotify:track:2"}
+
+	got := URIs(tracks)
+	if len(got) != len(want) || got[0] != want[0] || got[1] != want[1] {
+		t.Errorf("URIs(%v) = %v, want %v", tracks, got, want)
 	}
 }
 
