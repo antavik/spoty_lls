@@ -17,7 +17,7 @@ type fakeClient struct {
 	userID  string
 	userErr error
 
-	liked         []string
+	liked         []helpers.Track
 	likedErr      error
 	likedLimitGot int
 	likedCalled   bool
@@ -39,7 +39,7 @@ type fakeClient struct {
 	replaceErr           error
 	replaceCalled        bool
 	replacePlaylistIDGot string
-	replaceURIsGot       []string
+	replaceTracksGot     []helpers.Track
 
 	changeErr           error
 	changeCalled        bool
@@ -48,6 +48,15 @@ type fakeClient struct {
 }
 
 var _ SpotifyAPI = (*fakeClient)(nil)
+
+// likedTracks builds tracks with URI "spotify:track:<id>" and title "Song <id>".
+func likedTracks(ids ...string) []helpers.Track {
+	tracks := make([]helpers.Track, len(ids))
+	for i, id := range ids {
+		tracks[i] = helpers.Track{URI: "spotify:track:" + id, Title: "Song " + id, Artists: []string{"Artist"}}
+	}
+	return tracks
+}
 
 // testCfg builds a Config with the default liked limit for tests that don't
 // exercise SPOTIFY_LIKED_LIMIT specifically.
@@ -69,7 +78,7 @@ func (f *fakeClient) CurrentUserID() (string, error) {
 	return f.userID, nil
 }
 
-func (f *fakeClient) LikedTrackURIs(limit int) ([]string, error) {
+func (f *fakeClient) LikedTracks(limit int) ([]helpers.Track, error) {
 	f.likedCalled = true
 	f.likedLimitGot = limit
 	if f.likedErr != nil {
@@ -98,10 +107,10 @@ func (f *fakeClient) CreatePlaylist(ownerID, name string) (string, error) {
 	return f.createID, nil
 }
 
-func (f *fakeClient) ReplaceTracks(playlistID string, uris []string) error {
+func (f *fakeClient) ReplaceTracks(playlistID string, tracks []helpers.Track) error {
 	f.replaceCalled = true
 	f.replacePlaylistIDGot = playlistID
-	f.replaceURIsGot = uris
+	f.replaceTracksGot = tracks
 	return f.replaceErr
 }
 
@@ -113,7 +122,7 @@ func (f *fakeClient) ChangeDetails(playlistID, description string) error {
 }
 
 func TestRunLikedEmpty(t *testing.T) {
-	client := &fakeClient{userID: "user1", liked: []string{}}
+	client := &fakeClient{userID: "user1", liked: []helpers.Track{}}
 
 	notifyCalls := 0
 	err := Run(testCfg(), client, func(string) { notifyCalls++ })
@@ -139,8 +148,8 @@ func TestRunLikedEmpty(t *testing.T) {
 }
 
 func TestRunUnchanged(t *testing.T) {
-	liked := []string{"spotify:track:1", "spotify:track:2"}
-	digest := helpers.ComputeURIsHash(liked)
+	liked := likedTracks("1", "2")
+	digest := helpers.ComputeTracksHash(liked)
 	desc := helpers.BuildDescription(len(liked), digest)
 
 	client := &fakeClient{
@@ -181,8 +190,8 @@ func TestRunUnchanged(t *testing.T) {
 }
 
 func TestRunChanged(t *testing.T) {
-	liked := []string{"spotify:track:1", "spotify:track:2"}
-	digest := helpers.ComputeURIsHash(liked)
+	liked := likedTracks("1", "2")
+	digest := helpers.ComputeTracksHash(liked)
 
 	staleVariants := map[string]string{
 		"empty_description":  "",
@@ -215,8 +224,8 @@ func TestRunChanged(t *testing.T) {
 			if client.replacePlaylistIDGot != "pl1" {
 				t.Errorf("ReplaceTracks playlistID = %q, want %q", client.replacePlaylistIDGot, "pl1")
 			}
-			if !reflect.DeepEqual(client.replaceURIsGot, liked) {
-				t.Errorf("ReplaceTracks uris = %v, want %v", client.replaceURIsGot, liked)
+			if !reflect.DeepEqual(client.replaceTracksGot, liked) {
+				t.Errorf("ReplaceTracks tracks = %v, want %v", client.replaceTracksGot, liked)
 			}
 			if !client.changeCalled {
 				t.Fatalf("ChangeDetails not called, want called")
@@ -239,8 +248,8 @@ func TestRunChanged(t *testing.T) {
 }
 
 func TestRunPlaylistMissing(t *testing.T) {
-	liked := []string{"spotify:track:1", "spotify:track:2"}
-	digest := helpers.ComputeURIsHash(liked)
+	liked := likedTracks("1", "2")
+	digest := helpers.ComputeTracksHash(liked)
 
 	client := &fakeClient{
 		userID:    "user1",
@@ -270,8 +279,8 @@ func TestRunPlaylistMissing(t *testing.T) {
 	if client.replacePlaylistIDGot != "newpl" {
 		t.Errorf("ReplaceTracks playlistID = %q, want %q", client.replacePlaylistIDGot, "newpl")
 	}
-	if !reflect.DeepEqual(client.replaceURIsGot, liked) {
-		t.Errorf("ReplaceTracks uris = %v, want %v", client.replaceURIsGot, liked)
+	if !reflect.DeepEqual(client.replaceTracksGot, liked) {
+		t.Errorf("ReplaceTracks tracks = %v, want %v", client.replaceTracksGot, liked)
 	}
 	if !client.changeCalled {
 		t.Fatalf("ChangeDetails not called, want called")
@@ -292,7 +301,7 @@ func TestRunNotifyOnFailure(t *testing.T) {
 	baseline := func() *fakeClient {
 		return &fakeClient{
 			userID:    "user1",
-			liked:     []string{"spotify:track:1"},
+			liked:     likedTracks("1"),
 			findID:    "pl1",
 			findDesc:  "", // stale/absent -> triggers replace+change path
 			findFound: true,
@@ -320,7 +329,7 @@ func TestRunNotifyOnFailure(t *testing.T) {
 			},
 		},
 		{
-			name:      "LikedTrackURIs",
+			name:      "LikedTracks",
 			injectMsg: "liked boom",
 			modify: func(c *fakeClient, errText string) {
 				c.likedErr = errors.New(errText)
@@ -384,7 +393,7 @@ func TestRunNotifyOnFailure(t *testing.T) {
 }
 
 func TestRunCallsLikedWithLimit(t *testing.T) {
-	client := &fakeClient{userID: "user1", liked: []string{}}
+	client := &fakeClient{userID: "user1", liked: []helpers.Track{}}
 
 	err := Run(testCfg(), client, func(string) {})
 
@@ -392,15 +401,15 @@ func TestRunCallsLikedWithLimit(t *testing.T) {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 	if !client.likedCalled {
-		t.Fatalf("LikedTrackURIs not called, want called")
+		t.Fatalf("LikedTracks not called, want called")
 	}
 	if client.likedLimitGot != config.DefaultLikedLimit {
-		t.Errorf("LikedTrackURIs limit = %d, want %d (config.DefaultLikedLimit)", client.likedLimitGot, config.DefaultLikedLimit)
+		t.Errorf("LikedTracks limit = %d, want %d (config.DefaultLikedLimit)", client.likedLimitGot, config.DefaultLikedLimit)
 	}
 }
 
 func TestRunUsesCfgLikedLimit(t *testing.T) {
-	client := &fakeClient{userID: "user1", liked: []string{}}
+	client := &fakeClient{userID: "user1", liked: []helpers.Track{}}
 	cfg := config.Config{LikedLimit: 42}
 
 	err := Run(cfg, client, func(string) {})
@@ -409,16 +418,16 @@ func TestRunUsesCfgLikedLimit(t *testing.T) {
 		t.Fatalf("Run() error = %v, want nil", err)
 	}
 	if !client.likedCalled {
-		t.Fatalf("LikedTrackURIs not called, want called")
+		t.Fatalf("LikedTracks not called, want called")
 	}
 	if client.likedLimitGot != 42 {
-		t.Errorf("LikedTrackURIs limit = %d, want 42 (cfg.LikedLimit)", client.likedLimitGot)
+		t.Errorf("LikedTracks limit = %d, want 42 (cfg.LikedLimit)", client.likedLimitGot)
 	}
 }
 
 func TestRunUsesCfgPlaylistName(t *testing.T) {
 	const customName = "Custom Playlist"
-	liked := []string{"spotify:track:1", "spotify:track:2"}
+	liked := likedTracks("1", "2")
 	cfg := config.Config{
 		LikedLimit:   config.DefaultLikedLimit,
 		PlaylistName: customName,

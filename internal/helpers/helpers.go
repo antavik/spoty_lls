@@ -11,9 +11,27 @@ import (
 
 var hashRe = regexp.MustCompile(`\[#([0-9a-f]{12})\]`)
 
-func ComputeURIsHash(uris []string) string {
-	sum := sha256.Sum256([]byte(strings.Join(uris, "")))
+type Track struct {
+	URI     string
+	Title   string
+	Artists []string
+}
+
+func ComputeTracksHash(tracks []Track) string {
+	keys := make([]string, len(tracks))
+	for i, t := range tracks {
+		keys[i] = strings.Join(t.Artists, ", ") + " - " + t.Title
+	}
+	sum := sha256.Sum256([]byte(strings.Join(keys, "\n")))
 	return hex.EncodeToString(sum[:])[:12]
+}
+
+func URIs(tracks []Track) []string {
+	uris := make([]string, len(tracks))
+	for i, t := range tracks {
+		uris[i] = t.URI
+	}
+	return uris
 }
 
 func ParseHash(description string) (string, bool) {

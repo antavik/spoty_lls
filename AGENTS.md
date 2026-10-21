@@ -9,7 +9,7 @@ Guidance for code agents working in this repo.
 Key design goals:
 - **Zero dependencies**: Go stdlib only (Go 1.27). No third-party modules — keep it that way.
 - **Do not over-engineer**: small app, plain code. JSON payloads are handled as `map[string]any` (typed structs only where stability matters, e.g. the token response).
-- **Idempotent**: each run hashes the liked-track URIs (SHA-256, first 12 hex chars) and stores the digest in the playlist description (`[#<12-hex>]`). Unchanged hash → skip API writes.
+- **Idempotent**: each run hashes the liked tracks' `<artists> - <title>` keys in order (SHA-256, first 12 hex chars; URIs are not hashed, so a song re-linked to another URI is not a change) and stores the digest in the playlist description (`[#<12-hex>]`). Unchanged hash → skip API writes.
 - **Resilient**: retries on HTTP 429 (honors `Retry-After`, capped), 5xx, and network errors; re-authenticates on HTTP 401 then retries.
 - **Least-privilege**: prod image is distroless static, nonroot.
 
@@ -22,9 +22,9 @@ Key design goals:
 3. `app.Run(cfg, client, notify)`:
    - `Authenticate()` — refresh-token grant → Bearer token.
    - `CurrentUserID()`.
-   - `LikedTrackURIs(cfg.LikedLimit)` (default 100) — most-recent first, paginated.
+   - `LikedTracks(cfg.LikedLimit)` (default 100) — most-recent first, paginated; each `helpers.Track` has URI, title, artist names.
    - Empty liked list → log warning, exit success, **no playlist calls at all**.
-   - `helpers.ComputeURIsHash(liked)` → 12-hex digest.
+   - `helpers.ComputeTracksHash(liked)` → 12-hex digest.
    - `FindPlaylist(cfg.PlaylistName, userID)`; not found → `CreatePlaylist` (private).
    - Stored hash (parsed from description) == digest → skip.
    - Else `ReplaceTracks` (PUT first ≤100, POST remaining ≤100-chunks) + `ChangeDetails` (rewrite description with count/timestamp/hash).
@@ -38,7 +38,7 @@ Key design goals:
 | `cmd/get_token/main.go` | One-time interactive CLI to obtain a **refresh token** via the OAuth authorization-code flow (paste-the-redirect-URL style). Not unit-tested by design. |
 | `internal/config/config.go` | Constants (API URLs, limits, retry tuning, scopes) + `Load()` from env + `DebugMode`/`Debugf` gate. |
 | `internal/spotify/client.go` | `Client`: auth, core `do()` with retry loop, pagination, all Web API calls. No separate error taxonomy — plain `fmt.Errorf` errors; retry classification lives in `attempt()`/`do()`. |
-| `internal/helpers/helpers.go` | Pure functions: `ComputeURIsHash`, `ParseHash`, `BuildDescription`, `Str2Bool`. |
+| `internal/helpers/helpers.go` | `Track` type + pure functions: `ComputeTracksHash`, `URIs`, `ParseHash`, `BuildDescription`, `Str2Bool`. |
 | `internal/app/sync.go` | `Run()` orchestrator + `SpotifyAPI` interface (the test seam). |
 | `internal/app/alerting.go` | `NotifyTelegram` — best-effort, no-op if bot token/chat ID unset. |
 | `scripts/cron-run.sh` | Host-cron wrapper: pull image (cached fallback, old image removed), skip if already running (container name = lock), hardened `docker run --init`, propagate exit code. Shellchecked in CI. |
