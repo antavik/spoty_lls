@@ -7,7 +7,7 @@ Guidance for code agents working in this repo.
 `spoty_lls` ("Spotify Last Liked Sync") is a small, single-purpose **Go** job that keeps a Spotify playlist named **"Last Liked"** (default; configurable via `SPOTIFY_PLAYLIST_NAME`) in sync with the user's **most recently liked songs** (default 100, configurable via `SPOTIFY_LIKED_LIMIT`). It runs **once and exits** — designed to be triggered on a schedule (cron / Kubernetes CronJob) as a one-shot container.
 
 Key design goals:
-- **Zero dependencies**: Go stdlib only (Go 1.27). No third-party modules — keep it that way.
+- **Minimal dependencies**: Go stdlib (Go 1.27) + `github.com/go-pkgz/lgr` for logging. No other third-party modules — keep it that way.
 - **Do not over-engineer**: small app, plain code. JSON payloads are handled as `map[string]any` (typed structs only where stability matters, e.g. the token response).
 - **Idempotent**: each run hashes the liked tracks' `<artists> - <title>` keys in order (SHA-256, first 12 hex chars; URIs are not hashed, so a song re-linked to another URI is not a change) and stores the digest in the playlist description (`[#<12-hex>]`). Unchanged hash → skip API writes.
 - **Resilient**: retries on HTTP 429 (honors `Retry-After`, capped) and re-authenticates on HTTP 401 then retries, for every method; retries 5xx and network errors only for requests whose outcome is safe to repeat — API POSTs (`CreatePlaylist`, `ReplaceTracks` append) are **not** retried on 5xx/network error because the write may already have been applied.
@@ -37,7 +37,7 @@ Key design goals:
 |------|----------------|
 | `cmd/spoty_lls/main.go` | Sync entrypoint. Thin: `main()` = `os.Exit(run())`; `run() int` is testable without `os.Exit`. |
 | `cmd/get_token/main.go` | One-time interactive CLI to obtain a **refresh token** via the OAuth authorization-code flow (paste-the-redirect-URL style). Not unit-tested by design. |
-| `internal/config/config.go` | Constants (API URLs, limits, retry tuning, scopes) + `Load()` from env + `DebugMode`/`Debugf` gate. |
+| `internal/config/config.go` | Constants (API URLs, limits, retry tuning, scopes) + `Load()` from env (no logging helpers; logging is `lgr`, configured in `cmd/spoty_lls`). |
 | `internal/spotify/client.go` | `Client`: auth, core `do()` with retry loop, pagination, all Web API calls. No separate error taxonomy — plain `fmt.Errorf` errors; retry classification lives in `attempt()`/`do()`. |
 | `internal/helpers/helpers.go` | `Track` type + pure functions: `ComputeTracksHash`, `URIs`, `ParseHash`, `BuildDescription`, `Str2Bool`. |
 | `internal/app/sync.go` | `Run()` orchestrator + `SpotifyAPI` interface (the test seam). |
@@ -71,16 +71,16 @@ Optional: `SPOTIFY_REDIRECT_URI` (default `http://127.0.0.1:8888/callback`), `SP
 | `make build` | Docker build (`golang:1.27` → `distroless/static:nonroot`, `CGO_ENABLED=0`). |
 | `make run` | Build + run the sync job once (`--env-file .env`). |
 | `make token` | Interactive `get_token` helper in Docker. |
-| `make test` | `go test ./...` on the host toolchain (stdlib only; no network — all HTTP faked with `httptest`). |
+| `make test` | `go test ./...` on the host toolchain (no network — all HTTP faked with `httptest`). |
 | `make lint` | `go vet ./...` + fail if `gofmt -l .` non-empty. |
 | `make fmt` | `gofmt -w .` |
 
 ## Conventions
 
-- **Go 1.27**, stdlib only. Adding a third-party module requires a very strong justification (issue constraint).
+- **Go 1.27**, stdlib + `lgr` only. Adding another third-party module requires a very strong justification (issue constraint).
 - gofmt-clean, `go vet`-clean. Line length isn't enforced, but keep lines readable.
 - Tests are **colocated** (`*_test.go` next to sources). `internal/spotify` tests are same-package (`package spotify`) so they can inject `apiBase`/`tokenURL`/`sleep`/`token` on the `Client` directly.
 - Keep `internal/helpers` pure and side-effect free (most unit-tested layer).
 - Keep the orchestration in `internal/app.Run` behind the `SpotifyAPI` interface so `sync_test.go` can fake it; keep `cmd/*/main.go` thin.
-- `config.Debugf` for debug logging (gated on `DEV_MODE`); plain `log` for info/warning/error.
+- Logging via global `lgr` with level prefixes: `lgr.Printf("[DEBUG] ...")` (shown only when `DEV_MODE` is truthy), `[INFO]`, `[WARN]`, `[ERROR]`. All output goes to stderr; `cmd/spoty_lls` `setupLog` masks client secret, refresh token and Telegram bot token.
 - If your edit touches HTTP behavior, run `make test` before finishing.

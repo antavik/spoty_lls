@@ -279,16 +279,3 @@ func TestConstants(t *testing.T) {
 		}
 	}
 }
-
-func TestDebugf(t *testing.T) {
-	t.Run("disabled does not panic", func(t *testing.T) {
-		DebugMode = false
-		Debugf("x %d", 1)
-	})
-
-	t.Run("enabled does not panic", func(t *testing.T) {
-		DebugMode = true
-		Debugf("x %d", 1)
-		DebugMode = false
-	})
-}

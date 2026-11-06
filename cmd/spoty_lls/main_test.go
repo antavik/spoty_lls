@@ -1,6 +1,15 @@
 package main
 
-import "testing"
+import (
+	"io"
+	"os"
+	"strings"
+	"testing"
+
+	"github.com/go-pkgz/lgr"
+
+	"spoty_lls/internal/config"
+)
 
 // clearSpotifyEnv sets all config-related env vars to empty for a clean slate,
 // mirroring internal/config's clearSpotifyEnv helper. No network call should ever
@@ -39,5 +48,32 @@ func TestRunMissingRefreshToken(t *testing.T) {
 
 	if got != 1 {
 		t.Errorf("run() = %d, want 1 when SPOTIFY_REFRESH_TOKEN is empty (spotify.New should reject it before any network call)", got)
+	}
+}
+
+func TestSetupLogMasksSecrets(t *testing.T) {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	orig := os.Stderr
+	os.Stderr = w
+	t.Cleanup(func() {
+		os.Stderr = orig
+		lgr.Setup()
+	})
+
+	setupLog(config.Config{ClientSecret: "csecret", RefreshToken: "rtoken", TelegramBotToken: "bottok", DevMode: true})
+	lgr.Printf("[DEBUG] csecret rtoken https://api.telegram.org/botbottok/sendMessage")
+	_ = w.Close()
+	out, _ := io.ReadAll(r)
+
+	for _, s := range []string{"csecret", "rtoken", "bottok"} {
+		if strings.Contains(string(out), s) {
+			t.Errorf("log output %q leaks secret %q", out, s)
+		}
+	}
+	if !strings.Contains(string(out), "[DEBUG]") {
+		t.Errorf("log output %q missing [DEBUG] line, want debug enabled by DevMode", out)
 	}
 }

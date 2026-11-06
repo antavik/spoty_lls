@@ -1,7 +1,7 @@
 # spoty_lls — Spotify "Last Liked" playlist sync
 
 Keeps a playlist in sync with your most recently liked songs (100 by default, configurable via `SPOTIFY_LIKED_LIMIT`).
-Written in Go — **zero dependencies** (stdlib only), ships as a single static binary.
+Written in Go — stdlib plus one tiny dependency ([go-pkgz/lgr](https://github.com/go-pkgz/lgr) for logging), ships as a single static binary.
 
 ## 1. Create a Spotify app
 1. Go to https://developer.spotify.com/dashboard and create an app.

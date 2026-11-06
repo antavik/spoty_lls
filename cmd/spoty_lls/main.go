@@ -1,8 +1,9 @@
 package main
 
 import (
-	"log"
 	"os"
+
+	"github.com/go-pkgz/lgr"
 
 	"spoty_lls/internal/app"
 	"spoty_lls/internal/config"
@@ -15,17 +16,17 @@ func main() {
 
 func run() int {
 	cfg, err := config.Load()
+	setupLog(cfg) // zero cfg on error: info level, nothing to mask
 	if err != nil {
-		log.Printf("spoty_lls failed: %v", err)
+		lgr.Printf("[ERROR] spoty_lls failed: %v", err)
 		return 1
 	}
-	config.DebugMode = cfg.DevMode
 
 	client, err := spotify.New(cfg.ClientID, cfg.ClientSecret, cfg.RefreshToken)
 	if err != nil {
 		msg := "spoty_lls failed: " + err.Error()
 		app.NotifyTelegram(cfg.TelegramBotToken, cfg.TelegramChatID, msg)
-		log.Print(msg)
+		lgr.Printf("[ERROR] %s", msg)
 		return 1
 	}
 
@@ -36,4 +37,13 @@ func run() int {
 		return 1
 	}
 	return 0
+}
+
+func setupLog(cfg config.Config) {
+	opts := []lgr.Option{lgr.Out(os.Stderr), lgr.Err(os.Stderr), lgr.LevelBraces}
+	if cfg.DevMode {
+		opts = append(opts, lgr.Debug, lgr.CallerFile)
+	}
+	lgr.Setup(opts...)
+	lgr.AddSecrets(cfg.ClientSecret, cfg.RefreshToken, cfg.TelegramBotToken)
 }

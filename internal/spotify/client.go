@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-pkgz/lgr"
+
 	"spoty_lls/internal/config"
 	"spoty_lls/internal/helpers"
 )
@@ -211,7 +213,7 @@ func (c *Client) ChangeDetails(playlistID, description string) error {
 
 func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error {
 	if len(tracks) == 0 {
-		config.Debugf("replace_tracks called with empty tracks - skipping")
+		lgr.Printf("[DEBUG] replace_tracks called with empty tracks - skipping")
 		return nil
 	}
 
@@ -222,7 +224,7 @@ func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error 
 		return err
 	}
 	if snapshot, _ := result["snapshot_id"].(string); snapshot != "" {
-		config.Debugf("replace_tracks snapshot_id=%s", snapshot)
+		lgr.Printf("[DEBUG] replace_tracks snapshot_id=%s", snapshot)
 	}
 
 	for start := config.Batch; start < len(tracks); start += config.Batch {
@@ -249,7 +251,7 @@ func (c *Client) do(method, url string, body any) (map[string]any, error) {
 		if attempt >= config.MaxRetries {
 			return nil, err
 		}
-		config.Debugf("%s %s failed (%v); retry %d/%d in %s", method, url, err, attempt, config.MaxRetries, wait)
+		lgr.Printf("[DEBUG] %s %s failed (%v); retry %d/%d in %s", method, url, err, attempt, config.MaxRetries, wait)
 		if wait > 0 {
 			c.sleep(wait)
 		}

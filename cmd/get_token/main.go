@@ -6,11 +6,12 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/url"
 	"os"
 	"strings"
+
+	"github.com/go-pkgz/lgr"
 
 	"spoty_lls/internal/config"
 )
@@ -18,7 +19,7 @@ import (
 func main() {
 	cfg, err := config.Load()
 	if err != nil {
-		log.Fatalf("spoty_lls get_token: %v", err)
+		lgr.Fatalf("[ERROR] spoty_lls get_token: %v", err)
 	}
 
 	params := url.Values{
@@ -39,7 +40,7 @@ func main() {
 
 	parsed, err := url.Parse(redirected)
 	if err != nil {
-		log.Fatalf("could not parse redirected URL: %v", err)
+		lgr.Fatalf("[ERROR] could not parse redirected URL: %v", err)
 	}
 	qs := parsed.Query()
 	code := qs.Get("code")
@@ -48,7 +49,7 @@ func main() {
 		if errText == "" {
 			errText = "unknown"
 		}
-		log.Fatalf("no 'code' in URL (error: %s). Full query: %v", errText, qs)
+		lgr.Fatalf("[ERROR] no 'code' in URL (error: %s). Full query: %v", errText, qs)
 	}
 
 	form := url.Values{
@@ -58,7 +59,7 @@ func main() {
 	}
 	req, err := http.NewRequest(http.MethodPost, config.TokenURL, strings.NewReader(form.Encode()))
 	if err != nil {
-		log.Fatalf("token exchange failed: %v", err)
+		lgr.Fatalf("[ERROR] token exchange failed: %v", err)
 	}
 	basic := base64.StdEncoding.EncodeToString([]byte(cfg.ClientID + ":" + cfg.ClientSecret))
 	req.Header.Set("Authorization", "Basic "+basic)
@@ -67,23 +68,23 @@ func main() {
 	client := &http.Client{Timeout: config.RequestTimeout}
 	resp, err := client.Do(req)
 	if err != nil {
-		log.Fatalf("token exchange failed: %v", err)
+		lgr.Fatalf("[ERROR] token exchange failed: %v", err)
 	}
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)
 	if resp.StatusCode >= 400 {
-		log.Fatalf("token exchange failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+		lgr.Fatalf("[ERROR] token exchange failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 	}
 
 	var payload struct {
 		RefreshToken string `json:"refresh_token"`
 	}
 	if err := json.Unmarshal(body, &payload); err != nil {
-		log.Fatal("token exchange failed: invalid JSON response")
+		lgr.Fatalf("[ERROR] token exchange failed: invalid JSON response")
 	}
 	if payload.RefreshToken == "" {
-		log.Fatal("no 'refresh_token' in response. Check scopes and credentials.")
+		lgr.Fatalf("[ERROR] no 'refresh_token' in response. Check scopes and credentials.")
 	}
 
 	fmt.Print("\n=== Save this as SPOTIFY_REFRESH_TOKEN ===\n\n")
