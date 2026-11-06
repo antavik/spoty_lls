@@ -10,7 +10,7 @@ Key design goals:
 - **Zero dependencies**: Go stdlib only (Go 1.27). No third-party modules — keep it that way.
 - **Do not over-engineer**: small app, plain code. JSON payloads are handled as `map[string]any` (typed structs only where stability matters, e.g. the token response).
 - **Idempotent**: each run hashes the liked tracks' `<artists> - <title>` keys in order (SHA-256, first 12 hex chars; URIs are not hashed, so a song re-linked to another URI is not a change) and stores the digest in the playlist description (`[#<12-hex>]`). Unchanged hash → skip API writes.
-- **Resilient**: retries on HTTP 429 (honors `Retry-After`, capped), 5xx, and network errors; re-authenticates on HTTP 401 then retries.
+- **Resilient**: retries on HTTP 429 (honors `Retry-After`, capped) and re-authenticates on HTTP 401 then retries, for every method; retries 5xx and network errors only for requests whose outcome is safe to repeat — API POSTs (`CreatePlaylist`, `ReplaceTracks` append) are **not** retried on 5xx/network error because the write may already have been applied.
 - **Least-privilege**: prod image is distroless static, nonroot.
 
 > History note: this repo was rewritten from Python to Go (Linear A-59). The Python implementation had a latent bug — its transport layer's `raise_for_status()` converted every HTTP error into a generic `TransportError` before the 401/429/5xx branches could run, so those branches were dead code. The Go version implements the **documented intended semantics** (401 → re-auth → retry; 429 → honor `Retry-After`; other 4xx → immediate error, no retry). This was a deliberate, reviewed deviation.
@@ -26,6 +26,7 @@ Key design goals:
    - Empty liked list → log warning, exit success, **no playlist calls at all**.
    - `helpers.ComputeTracksHash(liked)` → 12-hex digest.
    - `FindPlaylist(cfg.PlaylistName, userID)`; not found → `CreatePlaylist` (private).
+   - `FindPlaylist` reports `found=false` only after proving the listing is complete: every playlist must be accounted for by the page `total` (present, nonnegative, integral) and ruled out by name/owner. Incomplete or ambiguous listings (missing/invalid `total`, null items, same-name entries without a known owner, …) → error instead of "not found", so a duplicate playlist is never created on an unproven miss.
    - Stored hash (parsed from description) == digest → skip.
    - Else `ReplaceTracks` (PUT first ≤100, POST remaining ≤100-chunks) + `ChangeDetails` (rewrite description with count/timestamp/hash).
 4. On any failure: `Run` calls `notify("spoty_lls failed: …")` (Telegram, best-effort) and returns the error; `run()` returns exit code 1.
@@ -46,9 +47,9 @@ Key design goals:
 ## Retry model (`internal/spotify/client.go`)
 
 - Max **3 attempts** (`config.MaxRetries`) per API call; sleeps via injectable `c.sleep` (tests never sleep for real).
-- **401** → `Authenticate()` → retry immediately (wait 0, consumes an attempt).
-- **429** → wait `Retry-After` seconds (default 2 if absent/invalid), capped at 300 (`config.MaxRetryWait`).
-- **5xx / network error** → wait 2s (`config.RetryDelay`), retry.
+- **401** → `Authenticate()` → retry immediately (wait 0, consumes an attempt). Applies to POSTs too.
+- **429** → wait `Retry-After` seconds (default 2 if absent/invalid), capped at 300 (`config.MaxRetryWait`). Applies to POSTs too.
+- **5xx / network error** → wait 2s (`config.RetryDelay`), retry — **except API POSTs** (`CreatePlaylist`, `ReplaceTracks` append): on a 5xx or network error the outcome of an in-flight POST is unknown (the write may already have been applied), so they return an error immediately with **no retry**.
 - **Other 4xx** → immediate error, **no retry**.
 - 2xx empty body → empty map; invalid JSON → error.
 

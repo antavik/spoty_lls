@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -136,6 +137,9 @@ func (c *Client) LikedTracks(limit int) ([]helpers.Track, error) {
 func (c *Client) FindPlaylist(name, ownerID string) (id, description string, found bool, err error) {
 	nextURL := fmt.Sprintf("%s/me/playlists?limit=%d", c.apiBase, config.Page)
 
+	ruledOut := 0
+	var total any
+
 	for nextURL != "" {
 		data, err := c.do(http.MethodGet, nextURL, nil)
 		if err != nil {
@@ -153,9 +157,28 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 				desc, _ := pl["description"].(string)
 				return plID, desc, true, nil
 			}
+			// Rule an entry out only when it provably is not the target:
+			// a different name always rules it out; a same-name entry is
+			// ruled out only if its owner is known to be someone else.
+			// Null/malformed entries and same-name ownerless entries are
+			// left ambiguous on purpose.
+			if plName != "" && (plName != name || plOwner != "") {
+				ruledOut++
+			}
 		}
 
+		total = data["total"]
 		nextURL, _ = data["next"].(string)
+	}
+
+	// Not-found must be proven, not assumed: the caller creates the
+	// playlist when found is false, so an incomplete or malformed
+	// listing would silently produce a duplicate. Every playlist must be
+	// accounted for: total known, nonnegative, integral, and fully
+	// covered by the entries ruled out above.
+	n, ok := total.(float64)
+	if !ok || n < 0 || n != math.Trunc(n) || float64(ruledOut) < n {
+		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %v; refusing to treat %q as not found", ruledOut, total, name)
 	}
 
 	return "", "", false, nil
@@ -256,9 +279,14 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	// A POST (CreatePlaylist, ReplaceTracks append) may already have been
+	// applied server-side when a network error or 5xx happens, so its
+	// outcome is unknown: retrying it could duplicate the playlist/tracks.
+	retryUnknown := method != http.MethodPost
+
 	resp, doErr := c.http.Do(req)
 	if doErr != nil {
-		return nil, true, config.RetryDelay, fmt.Errorf("%s %s: network error: %w", method, url, doErr)
+		return nil, retryUnknown, config.RetryDelay, fmt.Errorf("%s %s: network error: %w", method, url, doErr)
 	}
 	defer resp.Body.Close()
 
@@ -275,7 +303,7 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 		return nil, true, c.retryAfter(resp), fmt.Errorf("%s %s -> HTTP 429", method, url)
 
 	case resp.StatusCode >= 500:
-		return nil, true, config.RetryDelay,
+		return nil, retryUnknown, config.RetryDelay,
 			fmt.Errorf("%s %s -> HTTP %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode >= 400:

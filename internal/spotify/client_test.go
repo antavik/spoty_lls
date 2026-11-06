@@ -141,6 +141,19 @@ func serveSteps(steps []respStep) http.HandlerFunc {
 	}
 }
 
+// roundTripFunc is an http.RoundTripper that counts every call and delegates
+// to a scriptable fn. It simulates transport-level failures (network errors)
+// with no real network I/O and lets tests assert the exact RoundTrip count.
+type roundTripFunc struct {
+	calls int
+	fn    func(*http.Request) (*http.Response, error)
+}
+
+func (f *roundTripFunc) RoundTrip(req *http.Request) (*http.Response, error) {
+	f.calls++
+	return f.fn(req)
+}
+
 // newTestClient builds a *Client (via New) pointed at srv for both the API
 // base and the token endpoint, with an injected non-sleeping sleep func and
 // a preset bearer token ("tok") so API calls under test don't need to
@@ -591,6 +604,135 @@ func TestDoRetry(t *testing.T) {
 		}
 	})
 
+	// ---- POST retry contract (A-80) ------------------------------------
+	// A POST (e.g. CreatePlaylist) may already have taken effect server-side
+	// when a network error or 5xx occurs, so its outcome is unknown: it must
+	// NOT be retried. 401 and 429 are still retried for every method, POST
+	// included.
+
+	t.Run("5xx on POST is not retried (outcome unknown)", func(t *testing.T) {
+		plRec := &requestRecorder{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/users/u1/playlists", plRec.middleware(serveSteps([]respStep{
+			{status: 500},
+		})))
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, rec := newTestClient(t, srv)
+
+		_, err := c.CreatePlaylist("u1", "Last Liked")
+		if err == nil {
+			t.Fatal("expected error for persistent 500 on POST, got nil")
+		}
+		if plRec.count() != 1 {
+			t.Fatalf("expected exactly 1 API POST for 5xx (no retry on unknown outcome), got %d", plRec.count())
+		}
+		if len(rec.durations()) != 0 {
+			t.Fatalf("expected zero retry sleeps for non-retried POST, got %v", rec.durations())
+		}
+	})
+
+	t.Run("network error on POST is not retried (outcome unknown)", func(t *testing.T) {
+		mux := http.NewServeMux()
+		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
+			t.Errorf("server reached: transport should be scripted to fail (request: %s %s)", r.Method, r.URL)
+		})
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, err := New("id", "secret", "refresh")
+		if err != nil {
+			t.Fatalf("New() error: %v", err)
+		}
+		c.apiBase = srv.URL
+		c.tokenURL = srv.URL + "/token"
+		rec := &sleepRecorder{}
+		c.sleep = rec.record
+		c.token = "tok"
+		rt := &roundTripFunc{fn: func(*http.Request) (*http.Response, error) {
+			return nil, fmt.Errorf("connection reset by peer")
+		}}
+		c.http.Transport = rt
+
+		_, err = c.CreatePlaylist("u1", "Last Liked")
+		if err == nil {
+			t.Fatal("expected error after network failure on POST, got nil")
+		}
+		errContains(t, err, "network error")
+		if rt.calls != 1 {
+			t.Fatalf("expected exactly 1 RoundTrip for network error on POST (no retry on unknown outcome), got %d", rt.calls)
+		}
+		if len(rec.durations()) != 0 {
+			t.Fatalf("expected zero retry sleeps for non-retried POST, got %v", rec.durations())
+		}
+	})
+
+	t.Run("401 on POST still re-authenticates and retries", func(t *testing.T) {
+		plRec := &requestRecorder{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/token", serveSteps([]respStep{
+			{status: 200, body: `{"access_token":"newtok"}`},
+		}))
+		mux.HandleFunc("/users/u1/playlists", plRec.middleware(serveSteps([]respStep{
+			{status: 401},
+			{status: 200, body: `{"id":"pl42"}`},
+		})))
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, rec := newTestClient(t, srv)
+
+		id, err := c.CreatePlaylist("u1", "Last Liked")
+		if err != nil {
+			t.Fatalf("CreatePlaylist() unexpected error: %v", err)
+		}
+		if id != "pl42" {
+			t.Fatalf("expected id=pl42, got %q", id)
+		}
+		reqs := plRec.all()
+		if len(reqs) != 2 {
+			t.Fatalf("expected exactly 2 API POSTs (401 then success), got %d", len(reqs))
+		}
+		if reqs[0].Auth != "Bearer tok" {
+			t.Fatalf("expected first POST Authorization %q, got %q", "Bearer tok", reqs[0].Auth)
+		}
+		if reqs[1].Auth != "Bearer newtok" {
+			t.Fatalf("expected retried POST Authorization %q, got %q", "Bearer newtok", reqs[1].Auth)
+		}
+		if !allZero(rec.durations()) {
+			t.Fatalf("expected no positive sleep for 401 retry, got %v", rec.durations())
+		}
+	})
+
+	t.Run("429 on POST still honors Retry-After and retries", func(t *testing.T) {
+		plRec := &requestRecorder{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/users/u1/playlists", plRec.middleware(serveSteps([]respStep{
+			{status: 429, header: map[string]string{"Retry-After": "5"}},
+			{status: 200, body: `{"id":"pl43"}`},
+		})))
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, rec := newTestClient(t, srv)
+
+		id, err := c.CreatePlaylist("u1", "Last Liked")
+		if err != nil {
+			t.Fatalf("CreatePlaylist() unexpected error: %v", err)
+		}
+		if id != "pl43" {
+			t.Fatalf("expected id=pl43, got %q", id)
+		}
+		if plRec.count() != 2 {
+			t.Fatalf("expected exactly 2 API POSTs (429 then success), got %d", plRec.count())
+		}
+		want := []time.Duration{5 * time.Second}
+		if !equalDurations(rec.durations(), want) {
+			t.Fatalf("expected Retry-After sleeps %v, got %v", want, rec.durations())
+		}
+	})
+
 	t.Run("empty 2xx body is treated as success", func(t *testing.T) {
 		putRec := &requestRecorder{}
 		mux := http.NewServeMux()
@@ -903,6 +1045,7 @@ func TestFindPlaylist(t *testing.T) {
 				"items": [
 					{"id": "other1", "name": "Other", "owner": {"id": "u1"}, "description": ""}
 				],
+				"total": 1,
 				"next": null
 			}`))
 		}))
@@ -955,6 +1098,147 @@ func TestFindPlaylist(t *testing.T) {
 		}
 		if !found || id != "pl1" || desc != "d" {
 			t.Fatalf("expected found pl1/d via pagination, got found=%v id=%q desc=%q", found, id, desc)
+		}
+	})
+
+	t.Run("incomplete or malformed listing errors", func(t *testing.T) {
+		cases := []struct {
+			name string
+			body string
+		}{
+			{"truly empty body", ""},
+			{"null body", "null"},
+			{"empty object", "{}"},
+			{"missing total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}]}`},
+			{"fewer items than total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}],"total":5,"next":null}`},
+			{"null item", `{"items":[null],"total":1,"next":null}`},
+			{"same-name ownerless item", `{"items":[{"id":"other1","name":"Last Liked"}],"total":1,"next":null}`},
+			{"negative total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}],"total":-1,"next":null}`},
+			{"fractional total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""},{"id":"other2","name":"Other 2","owner":{"id":"u2"},"description":""}],"total":1.5,"next":null}`},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					w.WriteHeader(http.StatusOK)
+					if tc.body != "" {
+						_, _ = w.Write([]byte(tc.body))
+					}
+				}))
+				defer srv.Close()
+
+				c, _ := newTestClient(t, srv)
+
+				id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+				if err == nil {
+					t.Fatalf("FindPlaylist() error = nil, want descriptive error for body %q", tc.body)
+				}
+				errContains(t, err, "playlist listing incomplete")
+				if found {
+					t.Errorf("found = true, want false when listing is incomplete")
+				}
+				if id != "" || desc != "" {
+					t.Errorf("id/description = (%q, %q), want both empty when listing is incomplete", id, desc)
+				}
+			})
+		}
+	})
+
+	t.Run("complete empty library returns found=false without error", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"items":[],"total":0,"next":null}`))
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if found {
+			t.Fatalf("expected found=false for complete empty library, got true (id=%q)", id)
+		}
+		if id != "" || desc != "" {
+			t.Fatalf("expected empty id/desc, got id=%q desc=%q", id, desc)
+		}
+	})
+
+	t.Run("exact match with wrong total still returns found=true", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"items": [
+					{"id": "pl1", "name": "Last Liked", "owner": {"id": "u1"}, "description": "d"}
+				],
+				"total": 999,
+				"next": null
+			}`))
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+		if err != nil {
+			t.Fatalf("unexpected error (exact match must early-return, ignoring total): %v", err)
+		}
+		if !found || id != "pl1" || desc != "d" {
+			t.Fatalf("expected found pl1/d, got found=%v id=%q desc=%q", found, id, desc)
+		}
+	})
+
+	t.Run("complete two-page no match returns found=false without error", func(t *testing.T) {
+		var srv *httptest.Server
+		mux := http.NewServeMux()
+		mux.HandleFunc("/me/playlists", func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			if r.URL.RawQuery == "page=2" {
+				_, _ = w.Write([]byte(`{
+					"items": [
+						{"id": "other51", "name": "Other 51", "owner": {"id": "u2"}, "description": ""}
+					],
+					"total": 51,
+					"next": null
+				}`))
+				return
+			}
+			var items []string
+			for i := 1; i <= 50; i++ {
+				items = append(items, fmt.Sprintf(
+					`{"id": "other%d", "name": "Other %d", "owner": {"id": "u2"}, "description": ""}`, i, i))
+			}
+			next := srv.URL + "/me/playlists?page=2"
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"items": [%s],
+				"total": 51,
+				"next": %q
+			}`, strings.Join(items, ", "), next)))
+		})
+		rec := &requestRecorder{}
+		srv = httptest.NewServer(rec.middleware(http.HandlerFunc(mux.ServeHTTP)))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if found {
+			t.Fatalf("expected found=false, got true (id=%q desc=%q)", id, desc)
+		}
+		if id != "" || desc != "" {
+			t.Fatalf("expected empty id/desc, got id=%q desc=%q", id, desc)
+		}
+		var playlistReqs []reqLog
+		for _, req := range rec.all() {
+			if req.Path == "/me/playlists" {
+				playlistReqs = append(playlistReqs, req)
+			}
+		}
+		if len(playlistReqs) != 2 {
+			t.Fatalf("expected both pages requested (2 GETs to /me/playlists), got %d: %+v", len(playlistReqs), playlistReqs)
 		}
 	})
 }
