@@ -11,6 +11,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/go-pkgz/lgr"
+
 	"spoty_lls/internal/config"
 	"spoty_lls/internal/helpers"
 )
@@ -136,6 +138,9 @@ func (c *Client) LikedTracks(limit int) ([]helpers.Track, error) {
 func (c *Client) FindPlaylist(name, ownerID string) (id, description string, found bool, err error) {
 	nextURL := fmt.Sprintf("%s/me/playlists?limit=%d", c.apiBase, config.Page)
 
+	ruledOut := 0
+	var total any
+
 	for nextURL != "" {
 		data, err := c.do(http.MethodGet, nextURL, nil)
 		if err != nil {
@@ -148,14 +153,31 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 			owner, _ := pl["owner"].(map[string]any)
 			plName, _ := pl["name"].(string)
 			plOwner, _ := owner["id"].(string)
+
 			if plName == name && plOwner == ownerID {
 				plID, _ := pl["id"].(string)
 				desc, _ := pl["description"].(string)
 				return plID, desc, true, nil
 			}
+
+			// Rule out only provably wrong matches: different names are excluded,
+			// same-name entries only if the owner is known to differ; malformed
+			// or ownerless same-name entries stay ambiguous.
+			if plName != "" && (plName != name || plOwner != "") {
+				ruledOut++
+			}
 		}
 
+		total = data["total"]
 		nextURL, _ = data["next"].(string)
+	}
+
+	// A miss must be proven: a malformed or incomplete listing can create a
+	// duplicate. Require a known total fully covered by ruled-out entries
+	// before treating the playlist as absent. JSON numbers decode as float64.
+	n, ok := total.(float64)
+	if !ok || float64(ruledOut) < n {
+		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %v; refusing to treat %q as not found", ruledOut, total, name)
 	}
 
 	return "", "", false, nil
@@ -191,7 +213,7 @@ func (c *Client) ChangeDetails(playlistID, description string) error {
 
 func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error {
 	if len(tracks) == 0 {
-		config.Debugf("replace_tracks called with empty tracks - skipping")
+		lgr.Printf("[DEBUG] replace_tracks called with empty tracks - skipping")
 		return nil
 	}
 
@@ -202,7 +224,7 @@ func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error 
 		return err
 	}
 	if snapshot, _ := result["snapshot_id"].(string); snapshot != "" {
-		config.Debugf("replace_tracks snapshot_id=%s", snapshot)
+		lgr.Printf("[DEBUG] replace_tracks snapshot_id=%s", snapshot)
 	}
 
 	for start := config.Batch; start < len(tracks); start += config.Batch {
@@ -229,7 +251,7 @@ func (c *Client) do(method, url string, body any) (map[string]any, error) {
 		if attempt >= config.MaxRetries {
 			return nil, err
 		}
-		config.Debugf("%s %s failed (%v); retry %d/%d in %s", method, url, err, attempt, config.MaxRetries, wait)
+		lgr.Printf("[DEBUG] %s %s failed (%v); retry %d/%d in %s", method, url, err, attempt, config.MaxRetries, wait)
 		if wait > 0 {
 			c.sleep(wait)
 		}
@@ -256,9 +278,14 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 		req.Header.Set("Content-Type", "application/json")
 	}
 
+	// A POST (CreatePlaylist, ReplaceTracks append) may already have been
+	// applied server-side when a network error or 5xx happens, so its
+	// outcome is unknown: retrying it could duplicate the playlist/tracks.
+	retryUnknown := method != http.MethodPost
+
 	resp, doErr := c.http.Do(req)
 	if doErr != nil {
-		return nil, true, config.RetryDelay, fmt.Errorf("%s %s: network error: %w", method, url, doErr)
+		return nil, retryUnknown, config.RetryDelay, fmt.Errorf("%s %s: network error: %w", method, url, doErr)
 	}
 	defer resp.Body.Close()
 
@@ -275,7 +302,7 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 		return nil, true, c.retryAfter(resp), fmt.Errorf("%s %s -> HTTP 429", method, url)
 
 	case resp.StatusCode >= 500:
-		return nil, true, config.RetryDelay,
+		return nil, retryUnknown, config.RetryDelay,
 			fmt.Errorf("%s %s -> HTTP %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode >= 400:

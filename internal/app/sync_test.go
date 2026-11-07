@@ -297,6 +297,28 @@ func TestRunPlaylistMissing(t *testing.T) {
 	}
 }
 
+func TestRunFindPlaylistErrorFailsClosed(t *testing.T) {
+	liked := likedTracks("1", "2")
+	client := &fakeClient{
+		userID:  "user1",
+		liked:   liked,
+		findErr: errors.New("find playlist: playlist listing incomplete"),
+	}
+
+	if err := Run(testCfg(), client, func(string) {}); err == nil {
+		t.Fatalf("Run() error = nil, want the FindPlaylist error to be returned")
+	}
+	if client.createCalled {
+		t.Errorf("CreatePlaylist called, want zero calls after FindPlaylist error")
+	}
+	if client.replaceCalled {
+		t.Errorf("ReplaceTracks called, want zero calls after FindPlaylist error")
+	}
+	if client.changeCalled {
+		t.Errorf("ChangeDetails called, want zero calls after FindPlaylist error")
+	}
+}
+
 func TestRunNotifyOnFailure(t *testing.T) {
 	baseline := func() *fakeClient {
 		return &fakeClient{

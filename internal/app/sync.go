@@ -2,7 +2,8 @@ package app
 
 import (
 	"fmt"
-	"log"
+
+	"github.com/go-pkgz/lgr"
 
 	"spoty_lls/internal/config"
 	"spoty_lls/internal/helpers"
@@ -22,7 +23,7 @@ func Run(cfg config.Config, client SpotifyAPI, notify func(string)) error {
 	if err := sync(cfg, client); err != nil {
 		msg := fmt.Sprintf("spoty_lls failed: %v", err)
 		notify(msg)
-		log.Print(msg)
+		lgr.Printf("[ERROR] %s", msg)
 		return err
 	}
 	return nil
@@ -37,17 +38,17 @@ func sync(cfg config.Config, client SpotifyAPI) error {
 	if err != nil {
 		return err
 	}
-	config.Debugf("get current user id: %s", userID)
+	lgr.Printf("[DEBUG] get current user id: %s", userID)
 
 	liked, err := client.LikedTracks(cfg.LikedLimit)
 	if err != nil {
 		return err
 	}
 	if len(liked) == 0 {
-		log.Print("no liked tracks found, skipping playlist update")
+		lgr.Print("[WARN] no liked tracks found, skipping playlist update")
 		return nil
 	}
-	config.Debugf("get %d liked tracks", len(liked))
+	lgr.Printf("[DEBUG] get %d liked tracks", len(liked))
 
 	digest := helpers.ComputeTracksHash(liked)
 	playlistID, description, found, err := client.FindPlaylist(cfg.PlaylistName, userID)
@@ -61,27 +62,27 @@ func sync(cfg config.Config, client SpotifyAPI) error {
 		if err != nil {
 			return err
 		}
-		log.Printf("created playlist '%s' (%s)", cfg.PlaylistName, playlistID)
+		lgr.Printf("[INFO] created playlist '%s' (%s)", cfg.PlaylistName, playlistID)
 	} else {
 		storedHash, _ = helpers.ParseHash(description)
-		config.Debugf("found playlist '%s' (%s)", cfg.PlaylistName, playlistID)
+		lgr.Printf("[DEBUG] found playlist '%s' (%s)", cfg.PlaylistName, playlistID)
 	}
 
 	if storedHash == digest {
-		log.Printf("liked songs unchanged (hash %s), skipping update", digest)
+		lgr.Printf("[INFO] liked songs unchanged (hash %s), skipping update", digest)
 		return nil
 	}
 
 	if err := client.ReplaceTracks(playlistID, liked); err != nil {
 		return err
 	}
-	config.Debugf("replaced tracks in playlist '%s' (%s)", cfg.PlaylistName, playlistID)
+	lgr.Printf("[DEBUG] replaced tracks in playlist '%s' (%s)", cfg.PlaylistName, playlistID)
 
 	if err := client.ChangeDetails(playlistID, helpers.BuildDescription(len(liked), digest)); err != nil {
 		return err
 	}
-	config.Debugf("updated playlist description for '%s' (%s)", cfg.PlaylistName, playlistID)
+	lgr.Printf("[DEBUG] updated playlist description for '%s' (%s)", cfg.PlaylistName, playlistID)
 
-	log.Print("done")
+	lgr.Print("[INFO] done")
 	return nil
 }

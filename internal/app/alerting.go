@@ -1,10 +1,11 @@
 package app
 
 import (
-	"log"
 	"net/http"
 	"net/url"
 	"strings"
+
+	"github.com/go-pkgz/lgr"
 
 	"spoty_lls/internal/config"
 )
@@ -27,14 +28,14 @@ func NotifyTelegram(botToken, chatID, text string) {
 		strings.NewReader(form.Encode()),
 	)
 	if err != nil {
-		log.Printf("telegram notify failed: %v", err)
+		lgr.Printf("[WARN] telegram notify failed: %v", err)
 		return
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		log.Printf("telegram notify failed: HTTP %d", resp.StatusCode)
+		lgr.Printf("[WARN] telegram notify failed: HTTP %d", resp.StatusCode)
 		return
 	}
-	config.Debugf("telegram notify sent")
+	lgr.Printf("[DEBUG] telegram notify sent")
 }

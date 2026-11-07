@@ -2,7 +2,6 @@ package config
 
 import (
 	"fmt"
-	"log"
 	"os"
 	"strconv"
 	"time"
@@ -30,14 +29,6 @@ const (
 	RequestTimeout  = 15 * time.Second
 	TelegramTimeout = 10 * time.Second
 )
-
-var DebugMode bool
-
-func Debugf(format string, args ...any) {
-	if DebugMode {
-		log.Printf(format, args...)
-	}
-}
 
 type Config struct {
 	ClientID         string
