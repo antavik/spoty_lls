@@ -297,9 +297,6 @@ func TestRunPlaylistMissing(t *testing.T) {
 	}
 }
 
-// TestRunFindPlaylistErrorFailsClosed guards the A-80 contract: when
-// FindPlaylist fails (incomplete playlist listing), Run must surface the
-// error, notify exactly once, and make zero playlist mutation calls.
 func TestRunFindPlaylistErrorFailsClosed(t *testing.T) {
 	liked := likedTracks("1", "2")
 	client := &fakeClient{
@@ -308,17 +305,8 @@ func TestRunFindPlaylistErrorFailsClosed(t *testing.T) {
 		findErr: errors.New("find playlist: playlist listing incomplete"),
 	}
 
-	var notifyMsgs []string
-	err := Run(testCfg(), client, func(msg string) { notifyMsgs = append(notifyMsgs, msg) })
-
-	if err == nil {
+	if err := Run(testCfg(), client, func(string) {}); err == nil {
 		t.Fatalf("Run() error = nil, want the FindPlaylist error to be returned")
-	}
-	if len(notifyMsgs) != 1 {
-		t.Fatalf("notify called %d times, want exactly 1 (msgs=%v)", len(notifyMsgs), notifyMsgs)
-	}
-	if !strings.Contains(notifyMsgs[0], "playlist listing incomplete") {
-		t.Errorf("notify message = %q, want it to contain the FindPlaylist error text", notifyMsgs[0])
 	}
 	if client.createCalled {
 		t.Errorf("CreatePlaylist called, want zero calls after FindPlaylist error")

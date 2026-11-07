@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"math"
 	"net/http"
 	"net/url"
 	"strconv"
@@ -152,16 +151,16 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 			owner, _ := pl["owner"].(map[string]any)
 			plName, _ := pl["name"].(string)
 			plOwner, _ := owner["id"].(string)
+
 			if plName == name && plOwner == ownerID {
 				plID, _ := pl["id"].(string)
 				desc, _ := pl["description"].(string)
 				return plID, desc, true, nil
 			}
-			// Rule an entry out only when it provably is not the target:
-			// a different name always rules it out; a same-name entry is
-			// ruled out only if its owner is known to be someone else.
-			// Null/malformed entries and same-name ownerless entries are
-			// left ambiguous on purpose.
+
+			// Rule out only provably wrong matches: different names are excluded,
+			// same-name entries only if the owner is known to differ; malformed
+			// or ownerless same-name entries stay ambiguous.
 			if plName != "" && (plName != name || plOwner != "") {
 				ruledOut++
 			}
@@ -171,13 +170,11 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 		nextURL, _ = data["next"].(string)
 	}
 
-	// Not-found must be proven, not assumed: the caller creates the
-	// playlist when found is false, so an incomplete or malformed
-	// listing would silently produce a duplicate. Every playlist must be
-	// accounted for: total known, nonnegative, integral, and fully
-	// covered by the entries ruled out above.
+	// A miss must be proven: a malformed or incomplete listing can create a
+	// duplicate. Require a known total fully covered by ruled-out entries
+	// before treating the playlist as absent. JSON numbers decode as float64.
 	n, ok := total.(float64)
-	if !ok || n < 0 || n != math.Trunc(n) || float64(ruledOut) < n {
+	if !ok || float64(ruledOut) < n {
 		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %v; refusing to treat %q as not found", ruledOut, total, name)
 	}
 

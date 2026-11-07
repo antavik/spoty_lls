@@ -26,7 +26,7 @@ Key design goals:
    - Empty liked list → log warning, exit success, **no playlist calls at all**.
    - `helpers.ComputeTracksHash(liked)` → 12-hex digest.
    - `FindPlaylist(cfg.PlaylistName, userID)`; not found → `CreatePlaylist` (private).
-   - `FindPlaylist` reports `found=false` only after proving the listing is complete: every playlist must be accounted for by the page `total` (present, nonnegative, integral) and ruled out by name/owner. Incomplete or ambiguous listings (missing/invalid `total`, null items, same-name entries without a known owner, …) → error instead of "not found", so a duplicate playlist is never created on an unproven miss.
+   - `FindPlaylist` reports `found=false` only after proving the listing is complete: every playlist must be accounted for by the page `total` (must be present) and ruled out by name/owner. Incomplete or ambiguous listings (missing/invalid `total`, null items, same-name entries without a known owner, …) → error instead of "not found", so a duplicate playlist is never created on an unproven miss.
    - Stored hash (parsed from description) == digest → skip.
    - Else `ReplaceTracks` (PUT first ≤100, POST remaining ≤100-chunks) + `ChangeDetails` (rewrite description with count/timestamp/hash).
 4. On any failure: `Run` calls `notify("spoty_lls failed: …")` (Telegram, best-effort) and returns the error; `run()` returns exit code 1.

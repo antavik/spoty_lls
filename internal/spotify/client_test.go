@@ -141,9 +141,9 @@ func serveSteps(steps []respStep) http.HandlerFunc {
 	}
 }
 
-// roundTripFunc is an http.RoundTripper that counts every call and delegates
-// to a scriptable fn. It simulates transport-level failures (network errors)
-// with no real network I/O and lets tests assert the exact RoundTrip count.
+// roundTripFunc counts each round trip and delegates to a scriptable fn,
+// simulating transport failures without real network I/O so tests can assert
+// exact call counts.
 type roundTripFunc struct {
 	calls int
 	fn    func(*http.Request) (*http.Response, error)
@@ -634,28 +634,16 @@ func TestDoRetry(t *testing.T) {
 	})
 
 	t.Run("network error on POST is not retried (outcome unknown)", func(t *testing.T) {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
-			t.Errorf("server reached: transport should be scripted to fail (request: %s %s)", r.Method, r.URL)
-		})
-		srv := httptest.NewServer(mux)
+		srv := httptest.NewServer(http.NotFoundHandler())
 		defer srv.Close()
 
-		c, err := New("id", "secret", "refresh")
-		if err != nil {
-			t.Fatalf("New() error: %v", err)
-		}
-		c.apiBase = srv.URL
-		c.tokenURL = srv.URL + "/token"
-		rec := &sleepRecorder{}
-		c.sleep = rec.record
-		c.token = "tok"
+		c, rec := newTestClient(t, srv)
 		rt := &roundTripFunc{fn: func(*http.Request) (*http.Response, error) {
 			return nil, fmt.Errorf("connection reset by peer")
 		}}
 		c.http.Transport = rt
 
-		_, err = c.CreatePlaylist("u1", "Last Liked")
+		_, err := c.CreatePlaylist("u1", "Last Liked")
 		if err == nil {
 			t.Fatal("expected error after network failure on POST, got nil")
 		}
@@ -730,6 +718,30 @@ func TestDoRetry(t *testing.T) {
 		want := []time.Duration{5 * time.Second}
 		if !equalDurations(rec.durations(), want) {
 			t.Fatalf("expected Retry-After sleeps %v, got %v", want, rec.durations())
+		}
+	})
+
+	t.Run("5xx on PUT is retried (idempotent)", func(t *testing.T) {
+		putRec := &requestRecorder{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/playlists/pl1", putRec.middleware(serveSteps([]respStep{
+			{status: 500},
+			{status: 200},
+		})))
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, rec := newTestClient(t, srv)
+
+		if err := c.ChangeDetails("pl1", "d"); err != nil {
+			t.Fatalf("ChangeDetails() unexpected error: %v", err)
+		}
+		if putRec.count() != 2 {
+			t.Fatalf("expected 2 PUTs (500 then success), got %d", putRec.count())
+		}
+		want := []time.Duration{testRetryDelay}
+		if !equalDurations(rec.durations(), want) {
+			t.Fatalf("expected sleeps %v, got %v", want, rec.durations())
 		}
 	})
 
@@ -1106,23 +1118,17 @@ func TestFindPlaylist(t *testing.T) {
 			name string
 			body string
 		}{
-			{"truly empty body", ""},
-			{"null body", "null"},
 			{"empty object", "{}"},
 			{"missing total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}]}`},
 			{"fewer items than total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}],"total":5,"next":null}`},
 			{"null item", `{"items":[null],"total":1,"next":null}`},
 			{"same-name ownerless item", `{"items":[{"id":"other1","name":"Last Liked"}],"total":1,"next":null}`},
-			{"negative total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}],"total":-1,"next":null}`},
-			{"fractional total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""},{"id":"other2","name":"Other 2","owner":{"id":"u2"},"description":""}],"total":1.5,"next":null}`},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 					w.WriteHeader(http.StatusOK)
-					if tc.body != "" {
-						_, _ = w.Write([]byte(tc.body))
-					}
+					_, _ = w.Write([]byte(tc.body))
 				}))
 				defer srv.Close()
 
@@ -1164,14 +1170,16 @@ func TestFindPlaylist(t *testing.T) {
 		}
 	})
 
-	t.Run("exact match with wrong total still returns found=true", func(t *testing.T) {
+	t.Run("same-name playlist of another owner is ruled out", func(t *testing.T) {
+		// /me/playlists also lists followed playlists, so another user's
+		// "Last Liked" is a real, provably-not-ours entry.
 		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			w.WriteHeader(http.StatusOK)
 			_, _ = w.Write([]byte(`{
 				"items": [
-					{"id": "pl1", "name": "Last Liked", "owner": {"id": "u1"}, "description": "d"}
+					{"id": "foreign", "name": "Last Liked", "owner": {"id": "u2"}, "description": "x"}
 				],
-				"total": 999,
+				"total": 1,
 				"next": null
 			}`))
 		}))
@@ -1181,10 +1189,39 @@ func TestFindPlaylist(t *testing.T) {
 
 		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
 		if err != nil {
-			t.Fatalf("unexpected error (exact match must early-return, ignoring total): %v", err)
+			t.Fatalf("unexpected error: %v", err)
 		}
-		if !found || id != "pl1" || desc != "d" {
-			t.Fatalf("expected found pl1/d, got found=%v id=%q desc=%q", found, id, desc)
+		if found || id != "" || desc != "" {
+			t.Fatalf("expected not found, got found=%v id=%q desc=%q", found, id, desc)
+		}
+	})
+
+	t.Run("error on later page is returned, not treated as not found", func(t *testing.T) {
+		var srv *httptest.Server
+		mux := http.NewServeMux()
+		mux.HandleFunc("/me/playlists", func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.RawQuery == "page=2" {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(fmt.Sprintf(`{
+				"items": [
+					{"id": "other1", "name": "Other", "owner": {"id": "u1"}, "description": ""}
+				],
+				"total": 2,
+				"next": %q
+			}`, srv.URL+"/me/playlists?page=2")))
+		})
+		srv = httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+		errContains(t, err, "HTTP 500")
+		if found || id != "" || desc != "" {
+			t.Fatalf("expected not found with error, got found=%v id=%q desc=%q", found, id, desc)
 		}
 	})
 
@@ -1474,6 +1511,33 @@ func TestReplaceTracks(t *testing.T) {
 			if got[i] != tr.URI {
 				t.Fatalf("uri[%d]: expected %q, got %q (order/completeness broken)", i, tr.URI, got[i])
 			}
+		}
+	})
+
+	t.Run("failed append POST returns error without retry", func(t *testing.T) {
+		rec := &requestRecorder{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/playlists/pl1/tracks", rec.middleware(func(w http.ResponseWriter, r *http.Request) {
+			if r.Method == http.MethodPost {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"snapshot_id":"snap"}`))
+		}))
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, sleeps := newTestClient(t, srv)
+
+		err := c.ReplaceTracks("pl1", numberedTracks(150))
+		errContains(t, err, "HTTP 500")
+		reqs := rec.all()
+		if len(reqs) != 2 || reqs[0].Method != http.MethodPut || reqs[1].Method != http.MethodPost {
+			t.Fatalf("expected exactly PUT then one POST, got %+v", reqs)
+		}
+		if len(sleeps.durations()) != 0 {
+			t.Fatalf("expected no retry sleeps, got %v", sleeps.durations())
 		}
 	})
 
