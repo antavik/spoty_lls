@@ -16,7 +16,9 @@ func main() {
 
 func run() int {
 	cfg, err := config.Load()
-	setupLog(cfg) // zero cfg on error: info level, nothing to mask
+
+	setupLog(cfg)
+
 	if err != nil {
 		lgr.Printf("[ERROR] spoty_lls failed: %v", err)
 		return 1
