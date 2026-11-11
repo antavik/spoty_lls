@@ -1404,6 +1404,52 @@ func TestFindPlaylist(t *testing.T) {
 			t.Errorf("expected not found with empty id/desc, got found=%v id=%q desc=%q", found, id, desc)
 		}
 	})
+
+	t.Run("listing diagnostics shapes", func(t *testing.T) {
+		cases := []struct {
+			name, body string
+			want       []string
+			notWant    []string
+		}{
+			{
+				// All returned items ruled out, but fewer than total: items must
+				// read as an empty list, not as a null items field from the API.
+				name: "all_ruled_out_page_shows_empty_list",
+				body: `{"items":[{"id":"o1","name":"Other","owner":{"id":"u2"}}],"total":2,"next":null}`,
+				want: []string{`"items":[]`, `"items_count":1`},
+			},
+			{
+				name:    "non_array_items_reduced_to_type",
+				body:    `{"items":{"leak":"secret-payload"},"total":1,"next":null}`,
+				want:    []string{`"items":"map[string]interface {}"`},
+				notWant: []string{"secret-payload"},
+			},
+			{
+				name: "missing_owner_id_is_null",
+				body: `{"items":[{"id":"p1","name":"Last Liked"}],"total":1,"next":null}`,
+				want: []string{`{"id":"p1","name":"Last Liked","owner":{"id":null}}`},
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(tc.body))
+				}))
+				defer srv.Close()
+
+				c, _ := newTestClient(t, srv)
+				_, _, _, err := c.FindPlaylist("Last Liked", "u1")
+				for _, w := range tc.want {
+					errContains(t, err, w)
+				}
+				for _, nw := range tc.notWant {
+					if strings.Contains(err.Error(), nw) {
+						t.Errorf("error leaks %q: %v", nw, err)
+					}
+				}
+			})
+		}
+	})
 }
 
 // ---- TestCreatePlaylist -----------------------------------------------------

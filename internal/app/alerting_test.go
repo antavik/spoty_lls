@@ -1,6 +1,7 @@
 package app
 
 import (
+	"bytes"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -8,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"unicode/utf8"
+
+	"github.com/go-pkgz/lgr"
 )
 
 // partialEntityAtEnd matches a payload that ends in an '&' that is not the
@@ -128,6 +131,15 @@ func TestFormatTelegramText(t *testing.T) {
 			in:   strings.Repeat("日本語のテキスト", 1000), // 7000 bytes of multi-byte runes
 		},
 		{
+			name: "invalid_utf8_replaced",
+			in:   "bad \xff\xfe body",
+			want: "<pre>bad \uFFFD body</pre>",
+		},
+		{
+			name: "oversized_invalid_utf8",
+			in:   strings.Repeat("a\xff", 3000), // 12000 bytes once each \xff becomes U+FFFD
+		},
+		{
 			name: "mixed_entities_and_runes",
 			in:   strings.Repeat("& < 日本語 > ", 500), // ~10000 bytes once escaped
 			head: "<pre>&amp;",
@@ -174,5 +186,30 @@ func TestFormatTelegramText(t *testing.T) {
 				t.Errorf("payload ends with a partial HTML entity: %q", tail(contentOf(out), 32))
 			}
 		})
+	}
+}
+
+// TestNotifyTelegramLogsRejectionBody checks that a Telegram rejection (e.g.
+// an HTML entity parse error) is logged with Telegram's response body.
+func TestNotifyTelegramLogsRejectionBody(t *testing.T) {
+	const reply = `{"ok":false,"description":"Bad Request: can't parse entities"}`
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusBadRequest)
+		_, _ = w.Write([]byte(reply))
+	}))
+	t.Cleanup(srv.Close)
+
+	prevBase := telegramAPIBase
+	telegramAPIBase = srv.URL
+	t.Cleanup(func() { telegramAPIBase = prevBase })
+
+	var buf bytes.Buffer
+	lgr.Setup(lgr.Out(&buf), lgr.Err(&buf))
+	t.Cleanup(func() { lgr.Setup() })
+
+	NotifyTelegram("tok", "1", "boom")
+
+	if !strings.Contains(buf.String(), "HTTP 400: "+reply) {
+		t.Errorf("log = %q, want it to contain HTTP 400 and Telegram's response body", buf.String())
 	}
 }

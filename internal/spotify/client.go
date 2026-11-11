@@ -149,9 +149,9 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 		}
 
 		rawItems := data["items"]
-		items, _ := rawItems.([]any)
+		items, isArray := rawItems.([]any)
 
-		var ambiguous []any
+		ambiguous := []any{} // non-nil: an all-ruled-out page shows [], not null
 		for _, item := range items {
 			pl, _ := item.(map[string]any)
 			owner, _ := pl["owner"].(map[string]any)
@@ -182,7 +182,7 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 				ambiguous = append(ambiguous, map[string]any{
 					"id":    v["id"],
 					"name":  v["name"],
-					"owner": map[string]any{"id": plOwner},
+					"owner": map[string]any{"id": owner["id"]},
 				})
 			default:
 				ambiguous = append(ambiguous, fmt.Sprintf("%T", item))
@@ -190,11 +190,15 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 		}
 
 		total = data["total"]
-		// Raw top-level items is preserved when null or not an array; for arrays
-		// the sanitized ambiguous-item list stands in (ruled-out items omitted).
-		diagItems := rawItems
-		if _, isArray := rawItems.([]any); isArray {
+		// Arrays are replaced by the sanitized ambiguous-item list (ruled-out
+		// items omitted); a non-array value is reduced to its type so no raw
+		// payload leaks; missing/null stays null.
+		var diagItems any
+		switch {
+		case isArray:
 			diagItems = ambiguous
+		case rawItems != nil:
+			diagItems = fmt.Sprintf("%T", rawItems)
 		}
 		pages = append(pages, map[string]any{
 			"total":       total,
