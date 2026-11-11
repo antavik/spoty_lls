@@ -11,6 +11,7 @@ import (
 	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"spoty_lls/internal/helpers"
 )
@@ -1306,6 +1307,101 @@ func TestFindPlaylist(t *testing.T) {
 		}
 		if len(playlistReqs) != 2 {
 			t.Fatalf("expected both pages requested (2 GETs to /me/playlists), got %d: %+v", len(playlistReqs), playlistReqs)
+		}
+	})
+
+	t.Run("incomplete listing includes screenshot API diagnostics", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{"items":null,"total":44,"next":null}`))
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+		if err == nil {
+			t.Fatal("expected incomplete-listing error, got nil")
+		}
+		// Original application-level error stays intact...
+		errContains(t, err, "playlist listing incomplete")
+		errContains(t, err, "ruled out 0 of total 44")
+		// ...and is followed by sanitized API listing diagnostics (A-83).
+		errContains(t, err, "API responses:")
+		errContains(t, err, `"items":null`)
+		errContains(t, err, `"items_count":0`)
+		errContains(t, err, `"total":44`)
+		if found {
+			t.Errorf("found = true, want false when listing is incomplete")
+		}
+		if id != "" || desc != "" {
+			t.Errorf("id/description = (%q, %q), want both empty when listing is incomplete", id, desc)
+		}
+	})
+
+	t.Run("listing diagnostics are bounded and sanitized", func(t *testing.T) {
+		hugeID := strings.Repeat("a", 5000)
+		body, err := json.Marshal(map[string]any{
+			"items": []map[string]any{
+				{
+					// Provably ruled out: different name.
+					"id":          "other1",
+					"name":        "Other",
+					"owner":       map[string]any{"id": "u2"},
+					"description": "ruled-out-secret",
+				},
+				{
+					// Ambiguous: same name, unknown owner. Huge whitelisted id
+					// forces the diagnostics cap to be exercised.
+					"id":          hugeID,
+					"name":        "Last Liked",
+					"owner":       map[string]any{},
+					"description": "ambiguous-secret",
+					"external_urls": map[string]any{
+						"spotify": "https://open.spotify.com/playlist/" + hugeID,
+					},
+					"images": []map[string]any{
+						{"url": "https://i.scdn.co/image/cover.png", "width": 640, "height": 640},
+					},
+				},
+			},
+			"total": 44,
+			"next":  nil,
+		})
+		if err != nil {
+			t.Fatalf("failed to marshal fixture: %v", err)
+		}
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write(body)
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		id, desc, found, ferr := c.FindPlaylist("Last Liked", "u1")
+		if ferr == nil {
+			t.Fatal("expected incomplete-listing error (ruled out 1 of total 44), got nil")
+		}
+		errText := ferr.Error()
+		errContains(t, ferr, "playlist listing incomplete")
+		// Diagnostics block present and capped with a truncation marker...
+		errContains(t, ferr, "API responses:")
+		errContains(t, ferr, "[truncated]")
+		if len(errText) > 4100 {
+			t.Errorf("error length = %d, want <= 4100 (bounded diagnostics)", len(errText))
+		}
+		if !utf8.ValidString(errText) {
+			t.Error("error contains invalid UTF-8 after truncation")
+		}
+		// ...and sanitized: no descriptions, no external_urls/images payloads.
+		for _, secret := range []string{"ruled-out-secret", "ambiguous-secret", "external_urls", "images"} {
+			if strings.Contains(errText, secret) {
+				t.Errorf("error leaks sensitive field %q: %.200s", secret, errText)
+			}
+		}
+		if found || id != "" || desc != "" {
+			t.Errorf("expected not found with empty id/desc, got found=%v id=%q desc=%q", found, id, desc)
 		}
 	})
 }

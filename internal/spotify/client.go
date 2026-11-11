@@ -140,6 +140,7 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 
 	ruledOut := 0
 	var total any
+	var pages []map[string]any
 
 	for nextURL != "" {
 		data, err := c.do(http.MethodGet, nextURL, nil)
@@ -147,7 +148,10 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 			return "", "", false, err
 		}
 
-		items, _ := data["items"].([]any)
+		rawItems := data["items"]
+		items, _ := rawItems.([]any)
+
+		var ambiguous []any
 		for _, item := range items {
 			pl, _ := item.(map[string]any)
 			owner, _ := pl["owner"].(map[string]any)
@@ -165,10 +169,39 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 			// or ownerless same-name entries stay ambiguous.
 			if plName != "" && (plName != name || plOwner != "") {
 				ruledOut++
+				continue
+			}
+
+			// Diagnostics keep only the identifying fields of items that could
+			// not be ruled out (id, name, owner.id); the rest of the payload
+			// (descriptions, URLs, images, ...) is dropped.
+			switch v := item.(type) {
+			case nil:
+				ambiguous = append(ambiguous, nil)
+			case map[string]any:
+				ambiguous = append(ambiguous, map[string]any{
+					"id":    v["id"],
+					"name":  v["name"],
+					"owner": map[string]any{"id": plOwner},
+				})
+			default:
+				ambiguous = append(ambiguous, fmt.Sprintf("%T", item))
 			}
 		}
 
 		total = data["total"]
+		// Raw top-level items is preserved when null or not an array; for arrays
+		// the sanitized ambiguous-item list stands in (ruled-out items omitted).
+		diagItems := rawItems
+		if _, isArray := rawItems.([]any); isArray {
+			diagItems = ambiguous
+		}
+		pages = append(pages, map[string]any{
+			"total":       total,
+			"next":        data["next"],
+			"items_count": len(items),
+			"items":       diagItems,
+		})
 		nextURL, _ = data["next"].(string)
 	}
 
@@ -177,7 +210,14 @@ func (c *Client) FindPlaylist(name, ownerID string) (id, description string, fou
 	// before treating the playlist as absent. JSON numbers decode as float64.
 	n, ok := total.(float64)
 	if !ok || float64(ruledOut) < n {
-		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %v; refusing to treat %q as not found", ruledOut, total, name)
+		// Append a sanitized, size-capped view of the listing pages that
+		// triggered the refusal (json.Marshal cannot fail on decoded JSON).
+		diag, _ := json.Marshal(pages)
+		const diagCap, marker = 3900, "...[truncated]"
+		if len(diag) > diagCap {
+			diag = []byte(strings.ToValidUTF8(string(diag[:diagCap-len(marker)]), "?") + marker)
+		}
+		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %v; refusing to treat %q as not found; API responses: %s", ruledOut, total, name, diag)
 	}
 
 	return "", "", false, nil
