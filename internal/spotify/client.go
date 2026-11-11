@@ -3,6 +3,7 @@ package spotify
 import (
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -86,15 +87,14 @@ func (c *Client) Authenticate() error {
 }
 
 func (c *Client) CurrentUserID() (string, error) {
-	result, err := c.do(http.MethodGet, c.apiBase+"/me", nil)
-	if err != nil {
+	var user User
+	if err := c.do(http.MethodGet, c.apiBase+"/me", nil, &user); err != nil {
 		return "", err
 	}
-	userID, _ := result["id"].(string)
-	if userID == "" {
+	if user.ID == "" {
 		return "", fmt.Errorf("unexpected response from /me: missing 'id'")
 	}
-	return userID, nil
+	return user.ID, nil
 }
 
 func (c *Client) LikedTracks(limit int) ([]helpers.Track, error) {
@@ -102,157 +102,135 @@ func (c *Client) LikedTracks(limit int) ([]helpers.Track, error) {
 	nextURL := fmt.Sprintf("%s/me/tracks?limit=%d", c.apiBase, config.Page)
 
 	for nextURL != "" {
-		data, err := c.do(http.MethodGet, nextURL, nil)
-		if err != nil {
+		var page Paging[SavedTrack]
+		if err := c.do(http.MethodGet, nextURL, nil, &page); err != nil {
 			return nil, err
 		}
 
-		items, _ := data["items"].([]any)
-		for _, item := range items {
-			m, _ := item.(map[string]any)
-			track, _ := m["track"].(map[string]any)
-			uri, _ := track["uri"].(string)
-			if uri != "" {
-				title, _ := track["name"].(string)
+		for _, item := range page.Items {
+			if t := item.Track; t.URI != "" {
 				var names []string
-				artists, _ := track["artists"].([]any)
-				for _, a := range artists {
-					artist, _ := a.(map[string]any)
-					if name, _ := artist["name"].(string); name != "" {
-						names = append(names, name)
+				for _, a := range t.Artists {
+					if a.Name != "" {
+						names = append(names, a.Name)
 					}
 				}
-				tracks = append(tracks, helpers.Track{URI: uri, Title: title, Artists: names})
+				tracks = append(tracks, helpers.Track{URI: t.URI, Title: t.Name, Artists: names})
 			}
 			if len(tracks) >= limit {
 				return tracks, nil
 			}
 		}
 
-		nextURL, _ = data["next"].(string)
+		nextURL = page.Next
 	}
 
 	return tracks, nil
+}
+
+type playlistRef struct {
+	ID    string        `json:"id"`
+	Name  string        `json:"name"`
+	Owner PlaylistOwner `json:"owner"`
+}
+
+type listingPage struct {
+	Total      *int           `json:"total"`
+	Next       string         `json:"next"`
+	ItemsCount int            `json:"items_count"`
+	Items      []*playlistRef `json:"items"` // unruled items only; null if the API sent none
 }
 
 func (c *Client) FindPlaylist(name, ownerID string) (id, description string, found bool, err error) {
 	nextURL := fmt.Sprintf("%s/me/playlists?limit=%d", c.apiBase, config.Page)
 
 	ruledOut := 0
-	var total any
-	var pages []map[string]any
+	var total *int
+	var pages []listingPage
 
 	for nextURL != "" {
-		data, err := c.do(http.MethodGet, nextURL, nil)
-		if err != nil {
+		var page Paging[*SimplifiedPlaylist]
+		if err := c.do(http.MethodGet, nextURL, nil, &page); err != nil {
 			return "", "", false, err
 		}
 
-		rawItems := data["items"]
-		items, isArray := rawItems.([]any)
-
-		ambiguous := []any{} // non-nil: an all-ruled-out page shows [], not null
-		for _, item := range items {
-			pl, _ := item.(map[string]any)
-			owner, _ := pl["owner"].(map[string]any)
-			plName, _ := pl["name"].(string)
-			plOwner, _ := owner["id"].(string)
-
-			if plName == name && plOwner == ownerID {
-				plID, _ := pl["id"].(string)
-				desc, _ := pl["description"].(string)
-				return plID, desc, true, nil
+		var ambiguous []*playlistRef
+		if page.Items != nil {
+			ambiguous = []*playlistRef{} // an all-ruled-out page shows [], not null
+		}
+		for _, pl := range page.Items {
+			if pl == nil {
+				ambiguous = append(ambiguous, nil)
+				continue
+			}
+			if pl.Name == name && pl.Owner.ID == ownerID {
+				return pl.ID, pl.Description, true, nil
 			}
 
 			// Rule out only provably wrong matches: different names are excluded,
-			// same-name entries only if the owner is known to differ; malformed
+			// same-name entries only if the owner is known to differ; nameless
 			// or ownerless same-name entries stay ambiguous.
-			if plName != "" && (plName != name || plOwner != "") {
+			if pl.Name != "" && (pl.Name != name || pl.Owner.ID != "") {
 				ruledOut++
 				continue
 			}
-
-			// Diagnostics keep only the identifying fields of items that could
-			// not be ruled out (id, name, owner.id); the rest of the payload
-			// (descriptions, URLs, images, ...) is dropped.
-			switch v := item.(type) {
-			case nil:
-				ambiguous = append(ambiguous, nil)
-			case map[string]any:
-				ambiguous = append(ambiguous, map[string]any{
-					"id":    v["id"],
-					"name":  v["name"],
-					"owner": map[string]any{"id": owner["id"]},
-				})
-			default:
-				ambiguous = append(ambiguous, fmt.Sprintf("%T", item))
-			}
+			ambiguous = append(ambiguous, &playlistRef{ID: pl.ID, Name: pl.Name, Owner: pl.Owner})
 		}
 
-		total = data["total"]
-		// Arrays are replaced by the sanitized ambiguous-item list (ruled-out
-		// items omitted); a non-array value is reduced to its type so no raw
-		// payload leaks; missing/null stays null.
-		var diagItems any
-		switch {
-		case isArray:
-			diagItems = ambiguous
-		case rawItems != nil:
-			diagItems = fmt.Sprintf("%T", rawItems)
-		}
-		pages = append(pages, map[string]any{
-			"total":       total,
-			"next":        data["next"],
-			"items_count": len(items),
-			"items":       diagItems,
-		})
-		nextURL, _ = data["next"].(string)
+		total = page.Total
+		pages = append(pages, listingPage{Total: total, Next: page.Next, ItemsCount: len(page.Items), Items: ambiguous})
+
+		nextURL = page.Next
 	}
 
 	// A miss must be proven: a malformed or incomplete listing can create a
 	// duplicate. Require a known total fully covered by ruled-out entries
-	// before treating the playlist as absent. JSON numbers decode as float64.
-	n, ok := total.(float64)
-	if !ok || float64(ruledOut) < n {
+	// before treating the playlist as absent.
+	if total == nil || ruledOut < *total {
+		totalText := "missing"
+		if total != nil {
+			totalText = strconv.Itoa(*total)
+		}
 		// Append a sanitized, size-capped view of the listing pages that
-		// triggered the refusal (json.Marshal cannot fail on decoded JSON).
+		// triggered the refusal (marshaling these plain structs cannot fail).
 		diag, _ := json.Marshal(pages)
 		const diagCap, marker = 3900, "...[truncated]"
 		if len(diag) > diagCap {
 			diag = []byte(strings.ToValidUTF8(string(diag[:diagCap-len(marker)]), "?") + marker)
 		}
-		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %v; refusing to treat %q as not found; API responses: %s", ruledOut, total, name, diag)
+		return "", "", false, fmt.Errorf("playlist listing incomplete: ruled out %d of total %s; refusing to treat %q as not found; API responses: %s", ruledOut, totalText, name, diag)
 	}
 
 	return "", "", false, nil
 }
 
 func (c *Client) CreatePlaylist(ownerID, name string) (string, error) {
-	result, err := c.do(
+	var pl SimplifiedPlaylist
+	err := c.do(
 		http.MethodPost,
 		fmt.Sprintf("%s/users/%s/playlists", c.apiBase, ownerID),
 		map[string]any{"name": name, "public": false},
+		&pl,
 	)
 	if err != nil {
 		return "", err
 	}
-	playlistID, _ := result["id"].(string)
-	if playlistID == "" {
+	if pl.ID == "" {
 		return "", fmt.Errorf("unexpected response from create playlist: missing 'id'")
 	}
-	return playlistID, nil
+	return pl.ID, nil
 }
 
 func (c *Client) ChangeDetails(playlistID, description string) error {
 	if description == "" {
 		return nil
 	}
-	_, err := c.do(
+	return c.do(
 		http.MethodPut,
 		fmt.Sprintf("%s/playlists/%s", c.apiBase, playlistID),
 		map[string]any{"description": description},
+		nil,
 	)
-	return err
 }
 
 func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error {
@@ -263,17 +241,17 @@ func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error 
 
 	tracksURL := fmt.Sprintf("%s/playlists/%s/tracks", c.apiBase, playlistID)
 
-	result, err := c.do(http.MethodPut, tracksURL, map[string]any{"uris": helpers.URIs(tracks)[:min(len(tracks), config.Batch)]})
-	if err != nil {
+	var snap Snapshot
+	if err := c.do(http.MethodPut, tracksURL, map[string]any{"uris": helpers.URIs(tracks)[:min(len(tracks), config.Batch)]}, &snap); err != nil {
 		return err
 	}
-	if snapshot, _ := result["snapshot_id"].(string); snapshot != "" {
-		lgr.Printf("[DEBUG] replace_tracks snapshot_id=%s", snapshot)
+	if snap.SnapshotID != "" {
+		lgr.Printf("[DEBUG] replace_tracks snapshot_id=%s", snap.SnapshotID)
 	}
 
 	for start := config.Batch; start < len(tracks); start += config.Batch {
 		end := min(start+config.Batch, len(tracks))
-		if _, err := c.do(http.MethodPost, tracksURL, map[string]any{"uris": helpers.URIs(tracks)[start:end]}); err != nil {
+		if err := c.do(http.MethodPost, tracksURL, map[string]any{"uris": helpers.URIs(tracks)[start:end]}, nil); err != nil {
 			return err
 		}
 	}
@@ -281,19 +259,19 @@ func (c *Client) ReplaceTracks(playlistID string, tracks []helpers.Track) error 
 	return nil
 }
 
-func (c *Client) do(method, url string, body any) (map[string]any, error) {
+func (c *Client) do(method, url string, body, out any) error {
 	if c.token == "" {
-		return nil, fmt.Errorf("client not authenticated")
+		return fmt.Errorf("client not authenticated")
 	}
 
 	attempt := 1
 	for {
-		result, retry, wait, err := c.attempt(method, url, body)
+		retry, wait, err := c.attempt(method, url, body, out)
 		if err == nil || !retry {
-			return result, err
+			return err
 		}
 		if attempt >= config.MaxRetries {
-			return nil, err
+			return err
 		}
 		lgr.Printf("[DEBUG] %s %s failed (%v); retry %d/%d in %s", method, url, err, attempt, config.MaxRetries, wait)
 		if wait > 0 {
@@ -303,19 +281,19 @@ func (c *Client) do(method, url string, body any) (map[string]any, error) {
 	}
 }
 
-func (c *Client) attempt(method, url string, body any) (result map[string]any, retry bool, wait time.Duration, err error) {
+func (c *Client) attempt(method, url string, body, out any) (retry bool, wait time.Duration, err error) {
 	var bodyReader io.Reader
 	if body != nil {
 		encoded, encErr := json.Marshal(body)
 		if encErr != nil {
-			return nil, false, 0, fmt.Errorf("%s %s: encode body: %w", method, url, encErr)
+			return false, 0, fmt.Errorf("%s %s: encode body: %w", method, url, encErr)
 		}
 		bodyReader = strings.NewReader(string(encoded))
 	}
 
 	req, reqErr := http.NewRequest(method, url, bodyReader)
 	if reqErr != nil {
-		return nil, false, 0, fmt.Errorf("%s %s: %w", method, url, reqErr)
+		return false, 0, fmt.Errorf("%s %s: %w", method, url, reqErr)
 	}
 	req.Header.Set("Authorization", "Bearer "+c.token)
 	if body != nil {
@@ -329,7 +307,7 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 
 	resp, doErr := c.http.Do(req)
 	if doErr != nil {
-		return nil, retryUnknown, config.RetryDelay, fmt.Errorf("%s %s: network error: %w", method, url, doErr)
+		return retryUnknown, config.RetryDelay, fmt.Errorf("%s %s: network error: %w", method, url, doErr)
 	}
 	defer resp.Body.Close()
 
@@ -338,34 +316,36 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 	switch {
 	case resp.StatusCode == http.StatusUnauthorized:
 		if authErr := c.Authenticate(); authErr != nil {
-			return nil, false, 0, authErr
+			return false, 0, authErr
 		}
-		return nil, true, 0,
+		return true, 0,
 			fmt.Errorf("%s %s -> HTTP 401: retrying after token refresh: %s", method, url, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return nil, true, c.retryAfter(resp),
+		return true, c.retryAfter(resp),
 			fmt.Errorf("%s %s -> HTTP 429: %s", method, url, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode >= 500:
-		return nil, retryUnknown, config.RetryDelay,
+		return retryUnknown, config.RetryDelay,
 			fmt.Errorf("%s %s -> HTTP %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode >= 400:
-		return nil, false, 0,
+		return false, 0,
 			fmt.Errorf("%s %s -> HTTP %d: %s", method, url, resp.StatusCode, strings.TrimSpace(string(content)))
 	}
 
-	if len(content) == 0 {
-		return map[string]any{}, false, 0, nil
+	if out == nil || len(content) == 0 {
+		return false, 0, nil
 	}
-
-	var decoded map[string]any
-	if jsonErr := json.Unmarshal(content, &decoded); jsonErr != nil {
-		return nil, false, 0,
+	if jsonErr := json.Unmarshal(content, out); jsonErr != nil {
+		var typeErr *json.UnmarshalTypeError
+		if errors.As(jsonErr, &typeErr) {
+			return false, 0, fmt.Errorf("%s %s -> unexpected response: %w", method, url, jsonErr)
+		}
+		return false, 0,
 			fmt.Errorf("%s %s -> invalid JSON response: %s", method, url, strings.TrimSpace(string(content)))
 	}
-	return decoded, false, 0, nil
+	return false, 0, nil
 }
 
 func (c *Client) retryAfter(resp *http.Response) time.Duration {

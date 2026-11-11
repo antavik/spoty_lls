@@ -1019,6 +1019,28 @@ func TestLikedTracks(t *testing.T) {
 			t.Fatalf("track[1]: expected empty title and artists, got %+v", tracks[1])
 		}
 	})
+
+	t.Run("wrongly typed field fails instead of syncing a partial list", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			w.WriteHeader(http.StatusOK)
+			_, _ = w.Write([]byte(`{
+				"items": [
+					{"track": {"uri": "spotify:track:1"}},
+					{"track": {"uri": 42}}
+				],
+				"next": null
+			}`))
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+
+		tracks, err := c.LikedTracks(10)
+		errContains(t, err, "unexpected response")
+		if tracks != nil {
+			t.Fatalf("expected no tracks on decode error, got %v", tracks)
+		}
+	})
 }
 
 // ---- TestFindPlaylist ------------------------------------------------------
@@ -1419,15 +1441,22 @@ func TestFindPlaylist(t *testing.T) {
 				want: []string{`"items":[]`, `"items_count":1`},
 			},
 			{
-				name:    "non_array_items_reduced_to_type",
+				// Valid JSON of the wrong shape fails decoding: the error names
+				// the mismatch but never echoes the payload.
+				name:    "non_array_items_rejected_without_payload",
 				body:    `{"items":{"leak":"secret-payload"},"total":1,"next":null}`,
-				want:    []string{`"items":"map[string]interface {}"`},
+				want:    []string{"unexpected response", "cannot unmarshal object"},
 				notWant: []string{"secret-payload"},
 			},
 			{
-				name: "missing_owner_id_is_null",
+				name: "missing_owner_id_is_empty",
 				body: `{"items":[{"id":"p1","name":"Last Liked"}],"total":1,"next":null}`,
-				want: []string{`{"id":"p1","name":"Last Liked","owner":{"id":null}}`},
+				want: []string{`{"id":"p1","name":"Last Liked","owner":{"id":""}}`},
+			},
+			{
+				name: "missing_total_reported",
+				body: `{"items":[],"next":null}`,
+				want: []string{"ruled out 0 of total missing", `"total":null`},
 			},
 		}
 		for _, tc := range cases {

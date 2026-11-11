@@ -13,8 +13,8 @@ import (
 )
 
 var telegramAPIBase = "https://api.telegram.org"
-const telegramTextLimit = 3900
 
+const telegramTextLimit = 3900
 const (
 	telegramPre       = "<pre>"
 	telegramPost      = "</pre>"
@@ -53,12 +53,6 @@ func NotifyTelegram(botToken, chatID, text string) {
 	lgr.Printf("[DEBUG] telegram notify sent")
 }
 
-// formatTelegramText wraps text in an HTML <pre> code block, escaping it so
-// arbitrary error text (including raw Spotify response bodies) renders as
-// plain text. Invalid UTF-8 is replaced first, since Telegram rejects it. The
-// complete formatted string is capped at telegramTextLimit bytes: when needed
-// the text is cut on a rune boundary (escaping rune by rune, so no partial
-// HTML entity) and telegramTruncated is added before </pre>.
 func formatTelegramText(text string) string {
 	text = strings.ToValidUTF8(text, "\uFFFD")
 	escaped := html.EscapeString(text)
