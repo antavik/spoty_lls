@@ -1,6 +1,8 @@
 package app
 
 import (
+	"html"
+	"io"
 	"net/http"
 	"net/url"
 	"strings"
@@ -10,6 +12,15 @@ import (
 	"spoty_lls/internal/config"
 )
 
+var telegramAPIBase = "https://api.telegram.org"
+
+const telegramTextLimit = 3900
+const (
+	telegramPre       = "<pre>"
+	telegramPost      = "</pre>"
+	telegramTruncated = "\n...[truncated]"
+)
+
 func NotifyTelegram(botToken, chatID, text string) {
 	if botToken == "" || chatID == "" {
 		return
@@ -17,13 +28,14 @@ func NotifyTelegram(botToken, chatID, text string) {
 
 	form := url.Values{
 		"chat_id":                  {chatID},
-		"text":                     {text},
+		"text":                     {formatTelegramText(text)},
+		"parse_mode":               {"HTML"},
 		"disable_web_page_preview": {"true"},
 	}
 
 	client := &http.Client{Timeout: config.TelegramTimeout}
 	resp, err := client.Post(
-		"https://api.telegram.org/bot"+botToken+"/sendMessage",
+		telegramAPIBase+"/bot"+botToken+"/sendMessage",
 		"application/x-www-form-urlencoded",
 		strings.NewReader(form.Encode()),
 	)
@@ -34,8 +46,30 @@ func NotifyTelegram(botToken, chatID, text string) {
 	defer resp.Body.Close()
 
 	if resp.StatusCode >= 400 {
-		lgr.Printf("[WARN] telegram notify failed: HTTP %d", resp.StatusCode)
+		body, _ := io.ReadAll(io.LimitReader(resp.Body, 1024))
+		lgr.Printf("[WARN] telegram notify failed: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		return
 	}
 	lgr.Printf("[DEBUG] telegram notify sent")
+}
+
+func formatTelegramText(text string) string {
+	text = strings.ToValidUTF8(text, "\uFFFD")
+	escaped := html.EscapeString(text)
+	if len(telegramPre)+len(escaped)+len(telegramPost) <= telegramTextLimit {
+		return telegramPre + escaped + telegramPost
+	}
+
+	budget := telegramTextLimit - len(telegramPre) - len(telegramTruncated) - len(telegramPost)
+	var b strings.Builder
+	b.WriteString(telegramPre)
+	for _, r := range text {
+		e := html.EscapeString(string(r))
+		if budget -= len(e); budget < 0 {
+			break
+		}
+		b.WriteString(e)
+	}
+	b.WriteString(telegramTruncated + telegramPost)
+	return b.String()
 }
