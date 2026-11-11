@@ -2,106 +2,86 @@ package app
 
 import (
 	"bytes"
+	"html"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"regexp"
+	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"unicode/utf8"
 
 	"github.com/go-pkgz/lgr"
 )
 
-// partialEntityAtEnd matches a payload that ends in an '&' that is not the
-// start of a complete entity: '&' followed by zero or more entity-body
-// characters and no closing ';'. Every '&' in a formatted message must belong
-// to a well-formed entity (a literal '&' in the input is escaped to &amp;), so
-// this only happens when truncation split an entity.
-var partialEntityAtEnd = regexp.MustCompile(`&[A-Za-z0-9#]*$`)
+// TestNotifyTelegram pins the outbound Telegram request contract (POST
+// /bot<token>/sendMessage with an HTML-escaped <pre> message and
+// parse_mode=HTML), the no-op guard for missing credentials, and logging of
+// Telegram's rejection body.
+func TestNotifyTelegram(t *testing.T) {
+	const reply = `{"ok":false,"description":"Bad Request: can't parse entities"}`
+	wantForm := url.Values{
+		"chat_id":                  {"424242"},
+		"text":                     {"<pre>failed: 401 &lt;bad&gt; &amp; retry</pre>"},
+		"parse_mode":               {"HTML"},
+		"disable_web_page_preview": {"true"},
+	}
 
-// contentOf strips the <pre> wrapper and the truncation marker from a
-// formatted Telegram message, leaving the escaped payload.
-func contentOf(out string) string {
-	c := strings.TrimPrefix(out, "<pre>")
-	c = strings.TrimSuffix(c, "</pre>")
-	c = strings.TrimSuffix(c, "\n...[truncated]")
-	return c
-}
+	cases := []struct {
+		name         string
+		token, chat  string
+		status       int
+		reply        string
+		wantRequests int
+		wantLog      string // substring; "" skips the check
+	}{
+		{name: "sends HTML form", token: "test-token", chat: "424242", status: http.StatusOK, wantRequests: 1},
+		{name: "logs rejection body", token: "test-token", chat: "424242", status: http.StatusBadRequest, reply: reply,
+			wantRequests: 1, wantLog: "WARN  telegram notify failed: HTTP 400: " + reply},
+		{name: "missing bot token is a no-op", chat: "424242", status: http.StatusOK},
+		{name: "missing chat id is a no-op", token: "test-token", status: http.StatusOK},
+	}
 
-// tail returns the last n bytes of s, for error display only (may split a rune).
-func tail(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[len(s)-n:]
-}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			var requests atomic.Int32
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				if r.Method != http.MethodPost || r.URL.Path != "/bottest-token/sendMessage" {
+					t.Errorf("request = %s %s, want POST /bottest-token/sendMessage", r.Method, r.URL.Path)
+				}
+				if ct := r.Header.Get("Content-Type"); ct != "application/x-www-form-urlencoded" {
+					t.Errorf("Content-Type = %q, want application/x-www-form-urlencoded", ct)
+				}
+				if err := r.ParseForm(); err != nil {
+					t.Errorf("ParseForm: %v", err)
+				}
+				if !reflect.DeepEqual(r.PostForm, wantForm) {
+					t.Errorf("form = %q, want %q", r.PostForm, wantForm)
+				}
+				w.WriteHeader(tc.status)
+				_, _ = w.Write([]byte(tc.reply))
+			}))
+			t.Cleanup(srv.Close)
 
-// head returns the first n bytes of s, for error display only (may split a rune).
-func head(s string, n int) string {
-	if len(s) <= n {
-		return s
-	}
-	return s[:n]
-}
+			prevBase := telegramAPIBase
+			telegramAPIBase = srv.URL
+			t.Cleanup(func() { telegramAPIBase = prevBase })
 
-// TestNotifyTelegramSendsHTMLForm pins the outbound Telegram request
-// contract: POST to /bot<token>/sendMessage against the configurable base
-// URL, with the message wrapped in a <pre> HTML code block, HTML-escaped,
-// parse_mode=HTML, and the pre-existing form fields unchanged.
-func TestNotifyTelegramSendsHTMLForm(t *testing.T) {
-	var gotMethod, gotPath, gotContentType string
-	var gotForm url.Values
+			var buf bytes.Buffer
+			lgr.Setup(lgr.Out(&buf), lgr.Err(&buf))
+			t.Cleanup(func() { lgr.Setup() })
 
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotMethod = r.Method
-		gotPath = r.URL.Path
-		gotContentType = r.Header.Get("Content-Type")
-		if err := r.ParseForm(); err != nil {
-			t.Errorf("ParseForm: %v", err)
-			return
-		}
-		gotForm = r.PostForm
-		w.WriteHeader(http.StatusOK)
-	}))
-	t.Cleanup(srv.Close)
+			NotifyTelegram(tc.token, tc.chat, "failed: 401 <bad> & retry")
 
-	prevBase := telegramAPIBase
-	telegramAPIBase = srv.URL
-	t.Cleanup(func() { telegramAPIBase = prevBase })
-
-	const (
-		token = "test-token"
-		chat  = "424242"
-		in    = "failed: 401 <bad> & retry"
-	)
-	NotifyTelegram(token, chat, in)
-
-	if gotMethod != http.MethodPost {
-		t.Errorf("method = %q, want POST", gotMethod)
-	}
-	wantPath := "/bot" + token + "/sendMessage"
-	if gotPath != wantPath {
-		t.Errorf("path = %q, want %q", gotPath, wantPath)
-	}
-	if gotContentType != "application/x-www-form-urlencoded" {
-		t.Errorf("Content-Type = %q, want %q", gotContentType, "application/x-www-form-urlencoded")
-	}
-	if got := gotForm.Get("chat_id"); got != chat {
-		t.Errorf("chat_id = %q, want %q", got, chat)
-	}
-	if got := gotForm.Get("disable_web_page_preview"); got != "true" {
-		t.Errorf("disable_web_page_preview = %q, want %q", got, "true")
-	}
-	if got := gotForm.Get("parse_mode"); got != "HTML" {
-		t.Errorf("parse_mode = %q, want %q", got, "HTML")
-	}
-	wantText := "<pre>failed: 401 &lt;bad&gt; &amp; retry</pre>"
-	if got := gotForm.Get("text"); got != wantText {
-		t.Errorf("text = %q, want %q", got, wantText)
-	}
-	if n := len(gotForm); n != 4 {
-		t.Errorf("form has %d fields (%q), want exactly chat_id, text, parse_mode, disable_web_page_preview", n, gotForm)
+			if got := int(requests.Load()); got != tc.wantRequests {
+				t.Errorf("requests = %d, want %d", got, tc.wantRequests)
+			}
+			if tc.wantLog != "" && !strings.Contains(buf.String(), tc.wantLog) {
+				t.Errorf("log = %q, want it to contain %q", buf.String(), tc.wantLog)
+			}
+		})
 	}
 }
 
@@ -110,106 +90,60 @@ func TestNotifyTelegramSendsHTMLForm(t *testing.T) {
 // re-escapes at the same boundary forever never terminates, so these calls
 // completing is itself the check.
 func TestFormatTelegramText(t *testing.T) {
+	const (
+		limit  = 3900
+		wrap   = len("<pre>") + len("</pre>")
+		marker = "\n...[truncated]</pre>"
+	)
+	fits := strings.Repeat("a", limit-wrap)
+
 	cases := []struct {
 		name string
 		in   string
-		want string // exact expected output when the input fits
-		head string // head that must survive truncation when the input does not fit
+		want string // exact output; "" means the input must be truncated
 	}{
-		{
-			name: "short_input_not_truncated",
-			in:   "failed: 401 <bad> & retry",
-			want: "<pre>failed: 401 &lt;bad&gt; &amp; retry</pre>",
-		},
-		{
-			name: "escape_heavy_worst_case",
-			in:   strings.Repeat("&", 5000), // 25000 bytes once escaped
-			head: "<pre>&amp;",
-		},
-		{
-			name: "oversized_unicode",
-			in:   strings.Repeat("日本語のテキスト", 1000), // 7000 bytes of multi-byte runes
-		},
-		{
-			name: "invalid_utf8_replaced",
-			in:   "bad \xff\xfe body",
-			want: "<pre>bad \uFFFD body</pre>",
-		},
-		{
-			name: "oversized_invalid_utf8",
-			in:   strings.Repeat("a\xff", 3000), // 12000 bytes once each \xff becomes U+FFFD
-		},
-		{
-			name: "mixed_entities_and_runes",
-			in:   strings.Repeat("& < 日本語 > ", 500), // ~10000 bytes once escaped
-			head: "<pre>&amp;",
-		},
+		{name: "short input escaped", in: "failed: 401 <bad> & retry", want: "<pre>failed: 401 &lt;bad&gt; &amp; retry</pre>"},
+		{name: "invalid UTF-8 replaced", in: "bad \xff\xfe body", want: "<pre>bad � body</pre>"},
+		{name: "exactly at limit not truncated", in: fits, want: "<pre>" + fits + "</pre>"},
+		{name: "one byte over limit", in: fits + "a"},
+		{name: "escaping pushes over limit", in: fits[4:] + "&"},
+		{name: "escape-heavy worst case", in: strings.Repeat("&", 5000)},
+		{name: "oversized multi-byte runes", in: strings.Repeat("日本語のテキスト", 1000)},
+		{name: "oversized invalid UTF-8", in: strings.Repeat("a\xff", 3000)},
+		{name: "mixed entities and runes", in: strings.Repeat("& < 日本語 > ", 500)},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			out := formatTelegramText(tc.in)
 
-			if len(out) > 3900 {
-				t.Fatalf("len(out) = %d, want <= 3900", len(out))
+			if len(out) > limit {
+				t.Fatalf("len(out) = %d, want <= %d", len(out), limit)
 			}
 			if !utf8.ValidString(out) {
-				t.Errorf("output is not valid UTF-8 (tail: %q)", tail(out, 48))
+				t.Errorf("output is not valid UTF-8")
 			}
-			if !strings.HasPrefix(out, "<pre>") {
-				t.Errorf("output = %q..., want it to start with <pre>", head(out, 48))
-			}
-			if !strings.HasSuffix(out, "</pre>") {
-				t.Errorf("output tail = %q, want it to end with </pre>", tail(out, 48))
-			}
-
 			if tc.want != "" {
 				if out != tc.want {
-					t.Fatalf("out = %q, want exact %q", out, tc.want)
-				}
-				if strings.Contains(out, "...[truncated]") {
-					t.Errorf("short input must not be truncated: %q", out)
+					t.Errorf("out = %q, want %q", out, tc.want)
 				}
 				return
 			}
 
-			if !strings.HasSuffix(out, "\n...[truncated]</pre>") {
-				t.Fatalf("out tail = %q, want marker \\n...[truncated] immediately before </pre>", tail(out, 48))
+			if !strings.HasPrefix(out, "<pre>") || !strings.HasSuffix(out, marker) {
+				t.Fatalf("out = %q...%q, want <pre>...%q", out[:min(len(out), 16)], out[max(0, len(out)-32):], marker)
 			}
-			if tc.head != "" && !strings.HasPrefix(out, tc.head) {
-				t.Errorf("out head = %q..., want it to start with %q (message head must survive truncation)", head(out, 48), tc.head)
+			// The kept payload must be the escaped form of a prefix of the
+			// input: this rejects split entities and lost message heads.
+			payload := strings.TrimSuffix(strings.TrimPrefix(out, "<pre>"), marker)
+			raw := html.UnescapeString(payload)
+			if html.EscapeString(raw) != payload || !strings.HasPrefix(strings.ToValidUTF8(tc.in, "�"), raw) {
+				t.Errorf("payload is not an escaped input prefix (tail %q)", payload[max(0, len(payload)-32):])
 			}
-			if len(contentOf(out)) == 0 {
-				t.Errorf("truncated message kept no payload at all: %q", out)
-			}
-			if partialEntityAtEnd.MatchString(contentOf(out)) {
-				t.Errorf("payload ends with a partial HTML entity: %q", tail(contentOf(out), 32))
+			// The budget is used up to less than one escaped rune (max 5 bytes).
+			if len(out) < limit-5 {
+				t.Errorf("len(out) = %d, want >= %d (truncation wastes budget)", len(out), limit-5)
 			}
 		})
-	}
-}
-
-// TestNotifyTelegramLogsRejectionBody checks that a Telegram rejection (e.g.
-// an HTML entity parse error) is logged with Telegram's response body.
-func TestNotifyTelegramLogsRejectionBody(t *testing.T) {
-	const reply = `{"ok":false,"description":"Bad Request: can't parse entities"}`
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusBadRequest)
-		_, _ = w.Write([]byte(reply))
-	}))
-	t.Cleanup(srv.Close)
-
-	prevBase := telegramAPIBase
-	telegramAPIBase = srv.URL
-	t.Cleanup(func() { telegramAPIBase = prevBase })
-
-	var buf bytes.Buffer
-	lgr.Setup(lgr.Out(&buf), lgr.Err(&buf))
-	t.Cleanup(func() { lgr.Setup() })
-
-	NotifyTelegram("tok", "1", "boom")
-
-	if !strings.Contains(buf.String(), "HTTP 400: "+reply) {
-		t.Errorf("log = %q, want it to contain HTTP 400 and Telegram's response body", buf.String())
 	}
 }

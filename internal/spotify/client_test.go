@@ -7,6 +7,9 @@ import (
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"reflect"
+	"slices"
+	"strconv"
 	"strings"
 	"sync"
 	"testing"
@@ -46,27 +49,6 @@ func (s *sleepRecorder) durations() []time.Duration {
 	out := make([]time.Duration, len(s.waits))
 	copy(out, s.waits)
 	return out
-}
-
-func allZero(ds []time.Duration) bool {
-	for _, d := range ds {
-		if d != 0 {
-			return false
-		}
-	}
-	return true
-}
-
-func equalDurations(a, b []time.Duration) bool {
-	if len(a) != len(b) {
-		return false
-	}
-	for i := range a {
-		if a[i] != b[i] {
-			return false
-		}
-	}
-	return true
 }
 
 // reqLog is one recorded HTTP request hitting a test server.
@@ -361,453 +343,191 @@ func TestAuthenticate(t *testing.T) {
 	})
 }
 
-// ---- TestDoRetry: retry/backoff contract exercised via CurrentUserID/ChangeDetails ----
+// ---- TestDoRetry: retry/backoff contract exercised via CurrentUserID/CreatePlaylist/ChangeDetails ----
 
 func TestDoRetry(t *testing.T) {
-	t.Run("401 then success re-authenticates and retries immediately", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/token", serveSteps([]respStep{
-			{status: 200, body: `{"access_token":"newtok"}`},
-		}))
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 401},
-			{status: 200, body: `{"id":"user1"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
+	const (
+		oldAuth = "Bearer tok"
+		newAuth = "Bearer newtok"
+	)
+	getMe := func(c *Client) error { _, err := c.CurrentUserID(); return err }
+	createPlaylist := func(c *Client) error { _, err := c.CreatePlaylist("u1", "Last Liked"); return err }
+	changeDetails := func(c *Client) error { return c.ChangeDetails("pl1", "d") }
+	retryAfter := func(v string) map[string]string { return map[string]string{"Retry-After": v} }
+	tokenOK := respStep{status: 200, body: `{"access_token":"newtok"}`}
+	meOK := respStep{status: 200, body: `{"id":"user1"}`}
+	playlistOK := respStep{status: 200, body: `{"id":"pl42"}`}
 
-		c, rec := newTestClient(t, srv)
+	// A POST (CreatePlaylist, ReplaceTracks append) may already have taken
+	// effect server-side on a 5xx, so it is NOT retried (A-80). 401 and 429
+	// are retried for every method. Every HTTP failure carries the raw
+	// Spotify response body in the error (A-83).
+	cases := []struct {
+		name       string
+		path       string
+		call       func(*Client) error
+		steps      []respStep
+		token      respStep // /token reply; zero value registers no /token handler
+		wantErr    string   // substring; "" means success
+		wantAuths  []string // Authorization header of each API request (len = attempts)
+		wantSleeps []time.Duration
+	}{
+		{
+			name: "401 re-authenticates and retries immediately", path: "/me", call: getMe,
+			steps: []respStep{{status: 401}, meOK}, token: tokenOK,
+			wantAuths: []string{oldAuth, newAuth},
+		},
+		{
+			name: "401 exhausted returns response body", path: "/me", call: getMe,
+			steps: []respStep{{status: 401, body: `{"error":"invalid_token"}`}}, token: tokenOK,
+			wantErr:   `HTTP 401: retrying after token refresh: {"error":"invalid_token"}`,
+			wantAuths: []string{oldAuth, newAuth, newAuth},
+		},
+		{
+			name: "401 with failed token refresh stops without retry", path: "/me", call: getMe,
+			steps: []respStep{{status: 401}}, token: respStep{status: 400, body: `{"error":"invalid_grant"}`},
+			wantErr:   `token refresh failed: HTTP 400: {"error":"invalid_grant"}`,
+			wantAuths: []string{oldAuth},
+		},
+		{
+			name: "429 honors Retry-After", path: "/me", call: getMe,
+			steps:      []respStep{{status: 429, header: retryAfter("7")}, meOK},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{7 * time.Second},
+		},
+		{
+			name: "429 Retry-After capped at max wait", path: "/me", call: getMe,
+			steps:      []respStep{{status: 429, header: retryAfter("600")}, meOK},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{testMaxRetryWait},
+		},
+		{
+			name: "429 unparsable Retry-After defaults to retry delay", path: "/me", call: getMe,
+			steps:      []respStep{{status: 429, header: retryAfter("abc")}, meOK},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{testRetryDelay},
+		},
+		{
+			name: "429 without Retry-After defaults to retry delay", path: "/me", call: getMe,
+			steps:      []respStep{{status: 429}, meOK},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{testRetryDelay},
+		},
+		{
+			name: "429 exhausted returns response body", path: "/me", call: getMe,
+			steps:      []respStep{{status: 429, header: retryAfter("7"), body: `{"error":"rate_limited"}`}},
+			wantErr:    `HTTP 429: {"error":"rate_limited"}`,
+			wantAuths:  []string{oldAuth, oldAuth, oldAuth},
+			wantSleeps: []time.Duration{7 * time.Second, 7 * time.Second},
+		},
+		{
+			name: "5xx retries with retry delay", path: "/me", call: getMe,
+			steps:      []respStep{{status: 500}, meOK},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{testRetryDelay},
+		},
+		{
+			name: "5xx exhausted returns response body", path: "/me", call: getMe,
+			steps:      []respStep{{status: 503, body: "upstream down"}},
+			wantErr:    "HTTP 503: upstream down",
+			wantAuths:  []string{oldAuth, oldAuth, oldAuth},
+			wantSleeps: []time.Duration{testRetryDelay, testRetryDelay},
+		},
+		{
+			name: "other 4xx fails immediately with response body", path: "/me", call: getMe,
+			steps:     []respStep{{status: 404, body: `{"error":"not found"}`}},
+			wantErr:   `HTTP 404: {"error":"not found"}`,
+			wantAuths: []string{oldAuth},
+		},
+		{
+			name: "5xx on POST is not retried (outcome unknown)", path: "/users/u1/playlists", call: createPlaylist,
+			steps:     []respStep{{status: 500, body: "boom"}},
+			wantErr:   "HTTP 500: boom",
+			wantAuths: []string{oldAuth},
+		},
+		{
+			name: "401 on POST re-authenticates and retries", path: "/users/u1/playlists", call: createPlaylist,
+			steps: []respStep{{status: 401}, playlistOK}, token: tokenOK,
+			wantAuths: []string{oldAuth, newAuth},
+		},
+		{
+			name: "429 on POST honors Retry-After and retries", path: "/users/u1/playlists", call: createPlaylist,
+			steps:      []respStep{{status: 429, header: retryAfter("5")}, playlistOK},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{5 * time.Second},
+		},
+		{
+			name: "5xx on PUT is retried (idempotent)", path: "/playlists/pl1", call: changeDetails,
+			steps:      []respStep{{status: 500}, {status: 200}},
+			wantAuths:  []string{oldAuth, oldAuth},
+			wantSleeps: []time.Duration{testRetryDelay},
+		},
+	}
 
-		id, err := c.CurrentUserID()
-		if err != nil {
-			t.Fatalf("CurrentUserID() unexpected error: %v", err)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			apiRec := &requestRecorder{}
+			mux := http.NewServeMux()
+			mux.HandleFunc(tc.path, apiRec.middleware(serveSteps(tc.steps)))
+			if tc.token.status != 0 {
+				mux.HandleFunc("/token", serveSteps([]respStep{tc.token}))
+			}
+			srv := httptest.NewServer(mux)
+			defer srv.Close()
+
+			c, rec := newTestClient(t, srv)
+			err := tc.call(c)
+
+			if tc.wantErr == "" {
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+			} else {
+				errContains(t, err, tc.wantErr)
+			}
+			var auths []string
+			for _, r := range apiRec.all() {
+				auths = append(auths, r.Auth)
+			}
+			if !slices.Equal(auths, tc.wantAuths) {
+				t.Errorf("request Authorization headers = %q, want %q", auths, tc.wantAuths)
+			}
+			if got := rec.durations(); !slices.Equal(got, tc.wantSleeps) {
+				t.Errorf("sleeps = %v, want %v", got, tc.wantSleeps)
+			}
+		})
+	}
+
+	t.Run("network error", func(t *testing.T) {
+		cases := []struct {
+			name       string
+			call       func(*Client) error
+			wantCalls  int
+			wantSleeps []time.Duration
+		}{
+			{"GET is retried", getMe, testMaxRetries, []time.Duration{testRetryDelay, testRetryDelay}},
+			{"POST is not retried (outcome unknown)", createPlaylist, 1, nil},
 		}
-		if id != "user1" {
-			t.Fatalf("expected id=user1, got %q", id)
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.NotFoundHandler())
+				defer srv.Close()
+
+				c, rec := newTestClient(t, srv)
+				rt := &roundTripFunc{fn: func(*http.Request) (*http.Response, error) {
+					return nil, fmt.Errorf("connection reset by peer")
+				}}
+				c.http.Transport = rt
+
+				errContains(t, tc.call(c), "network error")
+				if rt.calls != tc.wantCalls {
+					t.Errorf("round trips = %d, want %d", rt.calls, tc.wantCalls)
+				}
+				if got := rec.durations(); !slices.Equal(got, tc.wantSleeps) {
+					t.Errorf("sleeps = %v, want %v", got, tc.wantSleeps)
+				}
+			})
 		}
-		reqs := meRec.all()
-		if len(reqs) != 2 {
-			t.Fatalf("expected 2 /me requests, got %d", len(reqs))
-		}
-		if reqs[1].Auth != "Bearer newtok" {
-			t.Fatalf("expected retry Authorization %q, got %q", "Bearer newtok", reqs[1].Auth)
-		}
-		if !allZero(rec.durations()) {
-			t.Fatalf("expected no positive sleep for 401 retry, got %v", rec.durations())
-		}
-	})
-
-	t.Run("401 exhausted after max retries errors", func(t *testing.T) {
-		const body = `{"error":"invalid_token"}`
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/token", serveSteps([]respStep{
-			{status: 200, body: `{"access_token":"newtok"}`},
-		}))
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 401, body: body},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		_, err := c.CurrentUserID()
-		if err == nil {
-			t.Fatal("expected error after exhausting retries on persistent 401, got nil")
-		}
-		errContains(t, err, body)
-		if meRec.count() != testMaxRetries {
-			t.Fatalf("expected %d /me attempts, got %d", testMaxRetries, meRec.count())
-		}
-		if !allZero(rec.durations()) {
-			t.Fatalf("expected no positive sleep for 401 retries, got %v", rec.durations())
-		}
-	})
-
-	t.Run("429 exhausted after max retries errors with response body", func(t *testing.T) {
-		const body = `{"error":"rate_limited"}`
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 429, header: map[string]string{"Retry-After": "7"}, body: body},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		_, err := c.CurrentUserID()
-		if err == nil {
-			t.Fatal("expected error after exhausting retries on persistent 429, got nil")
-		}
-		errContains(t, err, body)
-		if meRec.count() != testMaxRetries {
-			t.Fatalf("expected %d /me attempts, got %d", testMaxRetries, meRec.count())
-		}
-		want := []time.Duration{7 * time.Second, 7 * time.Second}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected Retry-After sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("429 honors Retry-After header", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 429, header: map[string]string{"Retry-After": "7"}},
-			{status: 200, body: `{"id":"user1"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		if _, err := c.CurrentUserID(); err != nil {
-			t.Fatalf("CurrentUserID() unexpected error: %v", err)
-		}
-		want := []time.Duration{7 * time.Second}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("429 Retry-After capped at max wait", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 429, header: map[string]string{"Retry-After": "600"}},
-			{status: 200, body: `{"id":"user1"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		if _, err := c.CurrentUserID(); err != nil {
-			t.Fatalf("CurrentUserID() unexpected error: %v", err)
-		}
-		want := []time.Duration{testMaxRetryWait}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected capped sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("429 unparsable Retry-After defaults to retry delay", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 429, header: map[string]string{"Retry-After": "abc"}},
-			{status: 200, body: `{"id":"user1"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		if _, err := c.CurrentUserID(); err != nil {
-			t.Fatalf("CurrentUserID() unexpected error: %v", err)
-		}
-		want := []time.Duration{testRetryDelay}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected default sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("429 without Retry-After defaults to retry delay", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 429},
-			{status: 200, body: `{"id":"user1"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		if _, err := c.CurrentUserID(); err != nil {
-			t.Fatalf("CurrentUserID() unexpected error: %v", err)
-		}
-		want := []time.Duration{testRetryDelay}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected default sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("5xx then success retries with retry delay", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 500},
-			{status: 200, body: `{"id":"user1"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		if _, err := c.CurrentUserID(); err != nil {
-			t.Fatalf("CurrentUserID() unexpected error: %v", err)
-		}
-		want := []time.Duration{testRetryDelay}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("5xx exhausted after max retries errors", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 500},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		_, err := c.CurrentUserID()
-		if err == nil {
-			t.Fatal("expected error after exhausting retries on persistent 500, got nil")
-		}
-		if meRec.count() != testMaxRetries {
-			t.Fatalf("expected %d attempts, got %d", testMaxRetries, meRec.count())
-		}
-		want := []time.Duration{testRetryDelay, testRetryDelay}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("other 4xx errors immediately without retry", func(t *testing.T) {
-		meRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 404},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		_, err := c.CurrentUserID()
-		if err == nil {
-			t.Fatal("expected immediate error on 404, got nil")
-		}
-		if meRec.count() != 1 {
-			t.Fatalf("expected exactly 1 request for non-retryable 404, got %d", meRec.count())
-		}
-		if len(rec.durations()) != 0 {
-			t.Fatalf("expected no sleep for non-retryable 404, got %v", rec.durations())
-		}
-	})
-
-	t.Run("network error retries then errors", func(t *testing.T) {
-		// A server that is closed before use guarantees connection failures
-		// on every attempt, simulating a network error at the transport level.
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			t.Fatal("handler should never be invoked: server was closed before use")
-		}))
-		closedURL := srv.URL
-		srv.Close()
-
-		c, err := New("id", "secret", "refresh")
-		if err != nil {
-			t.Fatalf("New() error: %v", err)
-		}
-		c.apiBase = closedURL
-		c.tokenURL = closedURL + "/token"
-		rec := &sleepRecorder{}
-		c.sleep = rec.record
-		c.token = "tok"
-
-		_, err = c.CurrentUserID()
-		if err == nil {
-			t.Fatal("expected error after network failures, got nil")
-		}
-		want := []time.Duration{testRetryDelay, testRetryDelay}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	// ---- POST retry contract (A-80) ------------------------------------
-	// A POST (e.g. CreatePlaylist) may already have taken effect server-side
-	// when a network error or 5xx occurs, so its outcome is unknown: it must
-	// NOT be retried. 401 and 429 are still retried for every method, POST
-	// included.
-
-	t.Run("5xx on POST is not retried (outcome unknown)", func(t *testing.T) {
-		plRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/users/u1/playlists", plRec.middleware(serveSteps([]respStep{
-			{status: 500},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		_, err := c.CreatePlaylist("u1", "Last Liked")
-		if err == nil {
-			t.Fatal("expected error for persistent 500 on POST, got nil")
-		}
-		if plRec.count() != 1 {
-			t.Fatalf("expected exactly 1 API POST for 5xx (no retry on unknown outcome), got %d", plRec.count())
-		}
-		if len(rec.durations()) != 0 {
-			t.Fatalf("expected zero retry sleeps for non-retried POST, got %v", rec.durations())
-		}
-	})
-
-	t.Run("network error on POST is not retried (outcome unknown)", func(t *testing.T) {
-		srv := httptest.NewServer(http.NotFoundHandler())
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-		rt := &roundTripFunc{fn: func(*http.Request) (*http.Response, error) {
-			return nil, fmt.Errorf("connection reset by peer")
-		}}
-		c.http.Transport = rt
-
-		_, err := c.CreatePlaylist("u1", "Last Liked")
-		if err == nil {
-			t.Fatal("expected error after network failure on POST, got nil")
-		}
-		errContains(t, err, "network error")
-		if rt.calls != 1 {
-			t.Fatalf("expected exactly 1 RoundTrip for network error on POST (no retry on unknown outcome), got %d", rt.calls)
-		}
-		if len(rec.durations()) != 0 {
-			t.Fatalf("expected zero retry sleeps for non-retried POST, got %v", rec.durations())
-		}
-	})
-
-	t.Run("401 on POST still re-authenticates and retries", func(t *testing.T) {
-		plRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/token", serveSteps([]respStep{
-			{status: 200, body: `{"access_token":"newtok"}`},
-		}))
-		mux.HandleFunc("/users/u1/playlists", plRec.middleware(serveSteps([]respStep{
-			{status: 401},
-			{status: 200, body: `{"id":"pl42"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		id, err := c.CreatePlaylist("u1", "Last Liked")
-		if err != nil {
-			t.Fatalf("CreatePlaylist() unexpected error: %v", err)
-		}
-		if id != "pl42" {
-			t.Fatalf("expected id=pl42, got %q", id)
-		}
-		reqs := plRec.all()
-		if len(reqs) != 2 {
-			t.Fatalf("expected exactly 2 API POSTs (401 then success), got %d", len(reqs))
-		}
-		if reqs[0].Auth != "Bearer tok" {
-			t.Fatalf("expected first POST Authorization %q, got %q", "Bearer tok", reqs[0].Auth)
-		}
-		if reqs[1].Auth != "Bearer newtok" {
-			t.Fatalf("expected retried POST Authorization %q, got %q", "Bearer newtok", reqs[1].Auth)
-		}
-		if !allZero(rec.durations()) {
-			t.Fatalf("expected no positive sleep for 401 retry, got %v", rec.durations())
-		}
-	})
-
-	t.Run("429 on POST still honors Retry-After and retries", func(t *testing.T) {
-		plRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/users/u1/playlists", plRec.middleware(serveSteps([]respStep{
-			{status: 429, header: map[string]string{"Retry-After": "5"}},
-			{status: 200, body: `{"id":"pl43"}`},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		id, err := c.CreatePlaylist("u1", "Last Liked")
-		if err != nil {
-			t.Fatalf("CreatePlaylist() unexpected error: %v", err)
-		}
-		if id != "pl43" {
-			t.Fatalf("expected id=pl43, got %q", id)
-		}
-		if plRec.count() != 2 {
-			t.Fatalf("expected exactly 2 API POSTs (429 then success), got %d", plRec.count())
-		}
-		want := []time.Duration{5 * time.Second}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected Retry-After sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("5xx on PUT is retried (idempotent)", func(t *testing.T) {
-		putRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/playlists/pl1", putRec.middleware(serveSteps([]respStep{
-			{status: 500},
-			{status: 200},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, rec := newTestClient(t, srv)
-
-		if err := c.ChangeDetails("pl1", "d"); err != nil {
-			t.Fatalf("ChangeDetails() unexpected error: %v", err)
-		}
-		if putRec.count() != 2 {
-			t.Fatalf("expected 2 PUTs (500 then success), got %d", putRec.count())
-		}
-		want := []time.Duration{testRetryDelay}
-		if !equalDurations(rec.durations(), want) {
-			t.Fatalf("expected sleeps %v, got %v", want, rec.durations())
-		}
-	})
-
-	t.Run("empty 2xx body is treated as success", func(t *testing.T) {
-		putRec := &requestRecorder{}
-		mux := http.NewServeMux()
-		mux.HandleFunc("/playlists/pl1", putRec.middleware(serveSteps([]respStep{
-			{status: 200, body: ""},
-		})))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		if err := c.ChangeDetails("pl1", "desc"); err != nil {
-			t.Fatalf("ChangeDetails() unexpected error on empty 2xx body: %v", err)
-		}
-		if putRec.count() != 1 {
-			t.Fatalf("expected exactly 1 PUT request, got %d", putRec.count())
-		}
-	})
-
-	t.Run("invalid JSON 2xx body errors", func(t *testing.T) {
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me", serveSteps([]respStep{
-			{status: 200, body: "not-json"},
-		}))
-		srv := httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		_, err := c.CurrentUserID()
-		if err == nil {
-			t.Fatal("expected error for invalid JSON 2xx body, got nil")
-		}
-		errContains(t, err, "not-json")
 	})
 
 	t.Run("unauthenticated client errors without making a request", func(t *testing.T) {
@@ -833,40 +553,42 @@ func TestDoRetry(t *testing.T) {
 // ---- TestCurrentUserID ------------------------------------------------------
 
 func TestCurrentUserID(t *testing.T) {
-	t.Run("returns id on success", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.Path != "/me" {
-				t.Fatalf("expected path /me, got %s", r.URL.Path)
+	// Also pins 2xx body decoding in do(): an empty body leaves the target
+	// zero-valued, and a non-JSON body is echoed in the error.
+	cases := []struct {
+		name    string
+		body    string
+		wantID  string
+		wantErr string
+	}{
+		{name: "returns id", body: `{"id":"user1"}`, wantID: "user1"},
+		{name: "missing id errors", body: `{}`, wantErr: "missing 'id'"},
+		{name: "empty body errors as missing id", body: "", wantErr: "missing 'id'"},
+		{name: "invalid JSON errors with raw body", body: "not-json", wantErr: "invalid JSON response: not-json"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodGet || r.URL.Path != "/me" {
+					t.Errorf("request = %s %s, want GET /me", r.Method, r.URL.Path)
+				}
+				_, _ = w.Write([]byte(tc.body))
+			}))
+			defer srv.Close()
+
+			c, _ := newTestClient(t, srv)
+			id, err := c.CurrentUserID()
+
+			if tc.wantErr != "" {
+				errContains(t, err, tc.wantErr)
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
 			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"id":"user1"}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, err := c.CurrentUserID()
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if id != "user1" {
-			t.Fatalf("expected id=user1, got %q", id)
-		}
-	})
-
-	t.Run("missing id errors", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		if _, err := c.CurrentUserID(); err == nil {
-			t.Fatal("expected error for missing id, got nil")
-		}
-	})
+			if id != tc.wantID {
+				t.Errorf("id = %q, want %q", id, tc.wantID)
+			}
+		})
+	}
 }
 
 // ---- TestLikedTracks ---------------------------------------------------------
@@ -929,116 +651,64 @@ func TestLikedTracks(t *testing.T) {
 		}
 	})
 
-	t.Run("stops early once limit reached", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"track": {"uri": "spotify:track:1"}},
-					{"track": {"uri": "spotify:track:2"}},
-					{"track": {"uri": "spotify:track:3"}}
-				],
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		tracks, err := c.LikedTracks(2)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	t.Run("single page decoding", func(t *testing.T) {
+		cases := []struct {
+			name    string
+			body    string
+			limit   int
+			want    []helpers.Track
+			wantErr string
+		}{
+			{
+				name:  "stops early once limit reached",
+				body:  `{"items":[{"track":{"uri":"spotify:track:1"}},{"track":{"uri":"spotify:track:2"}},{"track":{"uri":"spotify:track:3"}}],"next":null}`,
+				limit: 2,
+				want:  []helpers.Track{{URI: "spotify:track:1"}, {URI: "spotify:track:2"}},
+			},
+			{
+				name:  "skips items with missing track or uri",
+				body:  `{"items":[{"track":null},{"track":{}},{"track":{"uri":"spotify:track:x"}}],"next":null}`,
+				limit: 10,
+				want:  []helpers.Track{{URI: "spotify:track:x"}},
+			},
+			{
+				name: "collects title and non-empty artist names",
+				body: `{"items":[
+					{"track":{"uri":"spotify:track:1","name":"Get Lucky","artists":[{"name":"Daft Punk"},{"name":"Pharrell Williams"},{}]}},
+					{"track":{"uri":"spotify:track:2"}}
+				],"next":null}`,
+				limit: 10,
+				want: []helpers.Track{
+					{URI: "spotify:track:1", Title: "Get Lucky", Artists: []string{"Daft Punk", "Pharrell Williams"}},
+					{URI: "spotify:track:2"},
+				},
+			},
+			{
+				name:    "wrongly typed field fails instead of syncing a partial list",
+				body:    `{"items":[{"track":{"uri":"spotify:track:1"}},{"track":{"uri":42}}],"next":null}`,
+				limit:   10,
+				wantErr: "unexpected response",
+			},
 		}
-		uris := helpers.URIs(tracks)
-		want := []string{"spotify:track:1", "spotify:track:2"}
-		if len(uris) != len(want) {
-			t.Fatalf("expected %d uris, got %d (%v)", len(want), len(uris), uris)
-		}
-		for i, u := range want {
-			if uris[i] != u {
-				t.Fatalf("uri[%d]: expected %q, got %q", i, u, uris[i])
-			}
-		}
-	})
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+					_, _ = w.Write([]byte(tc.body))
+				}))
+				defer srv.Close()
 
-	t.Run("skips items with missing track or uri", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"track": null},
-					{"track": {}},
-					{"track": {"uri": "spotify:track:x"}}
-				],
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
+				c, _ := newTestClient(t, srv)
+				tracks, err := c.LikedTracks(tc.limit)
 
-		c, _ := newTestClient(t, srv)
-
-		tracks, err := c.LikedTracks(10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		uris := helpers.URIs(tracks)
-		want := []string{"spotify:track:x"}
-		if len(uris) != len(want) || uris[0] != want[0] {
-			t.Fatalf("expected %v, got %v", want, uris)
-		}
-	})
-
-	t.Run("collects title and artist names", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"track": {"uri": "spotify:track:1", "name": "Get Lucky",
-						"artists": [{"name": "Daft Punk"}, {"name": "Pharrell Williams"}, {}]}},
-					{"track": {"uri": "spotify:track:2"}}
-				],
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		tracks, err := c.LikedTracks(10)
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if len(tracks) != 2 {
-			t.Fatalf("expected 2 tracks, got %d (%v)", len(tracks), tracks)
-		}
-		got := tracks[0]
-		if got.Title != "Get Lucky" || strings.Join(got.Artists, "|") != "Daft Punk|Pharrell Williams" {
-			t.Fatalf("track[0]: expected Get Lucky by [Daft Punk Pharrell Williams], got %+v", got)
-		}
-		if tracks[1].Title != "" || len(tracks[1].Artists) != 0 {
-			t.Fatalf("track[1]: expected empty title and artists, got %+v", tracks[1])
-		}
-	})
-
-	t.Run("wrongly typed field fails instead of syncing a partial list", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"track": {"uri": "spotify:track:1"}},
-					{"track": {"uri": 42}}
-				],
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		tracks, err := c.LikedTracks(10)
-		errContains(t, err, "unexpected response")
-		if tracks != nil {
-			t.Fatalf("expected no tracks on decode error, got %v", tracks)
+				if tc.wantErr != "" {
+					errContains(t, err, tc.wantErr)
+				} else if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if !reflect.DeepEqual(tracks, tc.want) {
+					t.Errorf("tracks = %+v, want %+v", tracks, tc.want)
+				}
+			})
 		}
 	})
 }
@@ -1046,417 +716,218 @@ func TestLikedTracks(t *testing.T) {
 // ---- TestFindPlaylist ------------------------------------------------------
 
 func TestFindPlaylist(t *testing.T) {
-	t.Run("finds playlist matching name and owner", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"id": "other1", "name": "Other", "owner": {"id": "u1"}, "description": "x"},
-					{"id": "other2", "name": "Last Liked", "owner": {"id": "u2"}, "description": "y"},
-					{"id": "pl1", "name": "Last Liked", "owner": {"id": "u1"}, "description": "desc [#abcdef012345]"}
-				],
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !found {
-			t.Fatal("expected found=true")
-		}
-		if id != "pl1" {
-			t.Fatalf("expected id=pl1, got %q", id)
-		}
-		if desc != "desc [#abcdef012345]" {
-			t.Fatalf("expected description, got %q", desc)
-		}
-	})
-
-	t.Run("null description becomes empty string", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"id": "pl1", "name": "Last Liked", "owner": {"id": "u1"}, "description": null}
-				],
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !found || id != "pl1" {
-			t.Fatalf("expected found pl1, got found=%v id=%q", found, id)
-		}
-		if desc != "" {
-			t.Fatalf("expected empty description for null, got %q", desc)
-		}
-	})
-
-	t.Run("no match returns found=false", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"id": "other1", "name": "Other", "owner": {"id": "u1"}, "description": ""}
-				],
-				"total": 1,
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if found {
-			t.Fatalf("expected found=false, got true (id=%q desc=%q)", id, desc)
-		}
-		if id != "" || desc != "" {
-			t.Fatalf("expected empty id/desc on no match, got id=%q desc=%q", id, desc)
-		}
-	})
-
-	t.Run("follows pagination via next", func(t *testing.T) {
-		var srv *httptest.Server
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me/playlists", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			if r.URL.RawQuery == "page=2" {
-				_, _ = w.Write([]byte(`{
-					"items": [
-						{"id": "pl1", "name": "Last Liked", "owner": {"id": "u1"}, "description": "d"}
-					],
-					"next": null
-				}`))
-				return
-			}
-			next := srv.URL + "/me/playlists?page=2"
-			_, _ = w.Write([]byte(fmt.Sprintf(`{
-				"items": [
-					{"id": "other1", "name": "Other", "owner": {"id": "u1"}, "description": ""}
-				],
-				"next": %q
-			}`, next)))
-		})
-		srv = httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if !found || id != "pl1" || desc != "d" {
-			t.Fatalf("expected found pl1/d via pagination, got found=%v id=%q desc=%q", found, id, desc)
-		}
-	})
-
-	t.Run("incomplete or malformed listing errors", func(t *testing.T) {
+	t.Run("single page lookup", func(t *testing.T) {
 		cases := []struct {
-			name string
-			body string
+			name      string
+			body      string
+			wantID    string
+			wantDesc  string
+			wantFound bool
 		}{
-			{"empty object", "{}"},
-			{"missing total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}]}`},
-			{"fewer items than total", `{"items":[{"id":"other1","name":"Other","owner":{"id":"u2"},"description":""}],"total":5,"next":null}`},
-			{"null item", `{"items":[null],"total":1,"next":null}`},
-			{"same-name ownerless item", `{"items":[{"id":"other1","name":"Last Liked"}],"total":1,"next":null}`},
+			{
+				name: "matches name and owner",
+				body: `{"items":[
+					{"id":"other1","name":"Other","owner":{"id":"u1"},"description":"x"},
+					{"id":"other2","name":"Last Liked","owner":{"id":"u2"},"description":"y"},
+					{"id":"pl1","name":"Last Liked","owner":{"id":"u1"},"description":"desc [#abcdef012345]"}
+				],"next":null}`,
+				wantID: "pl1", wantDesc: "desc [#abcdef012345]", wantFound: true,
+			},
+			{
+				name:   "null description becomes empty string",
+				body:   `{"items":[{"id":"pl1","name":"Last Liked","owner":{"id":"u1"},"description":null}],"next":null}`,
+				wantID: "pl1", wantFound: true,
+			},
+			{
+				name: "complete listing without match is not found",
+				body: `{"items":[{"id":"other1","name":"Other","owner":{"id":"u1"},"description":""}],"total":1,"next":null}`,
+			},
+			{
+				name: "complete empty library is not found",
+				body: `{"items":[],"total":0,"next":null}`,
+			},
+			{
+				// /me/playlists also lists followed playlists, so another user's
+				// "Last Liked" is a real, provably-not-ours entry.
+				name: "same-name playlist of another owner is ruled out",
+				body: `{"items":[{"id":"foreign","name":"Last Liked","owner":{"id":"u2"},"description":"x"}],"total":1,"next":null}`,
+			},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
 				srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-					w.WriteHeader(http.StatusOK)
 					_, _ = w.Write([]byte(tc.body))
 				}))
 				defer srv.Close()
 
 				c, _ := newTestClient(t, srv)
-
 				id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-				if err == nil {
-					t.Fatalf("FindPlaylist() error = nil, want descriptive error for body %q", tc.body)
+				if err != nil {
+					t.Fatalf("unexpected error: %v", err)
 				}
-				errContains(t, err, "playlist listing incomplete")
-				if found {
-					t.Errorf("found = true, want false when listing is incomplete")
+				if id != tc.wantID || desc != tc.wantDesc || found != tc.wantFound {
+					t.Errorf("FindPlaylist() = (%q, %q, %v), want (%q, %q, %v)", id, desc, found, tc.wantID, tc.wantDesc, tc.wantFound)
 				}
-				if id != "" || desc != "" {
-					t.Errorf("id/description = (%q, %q), want both empty when listing is incomplete", id, desc)
+			})
+		}
+	})
+	t.Run("multi-page listing", func(t *testing.T) {
+		// NEXT in a page body (and in wantErr) stands for the next page's URL.
+		var others []string
+		for i := 1; i <= 50; i++ {
+			others = append(others, fmt.Sprintf(`{"id":"o%d","name":"Other %d","owner":{"id":"u2"}}`, i, i))
+		}
+		fullPage := `{"items":[` + strings.Join(others, ",") + `],"total":51,"next":"NEXT"}`
+
+		cases := []struct {
+			name      string
+			pages     []respStep
+			wantID    string
+			wantDesc  string
+			wantFound bool
+			wantErr   string
+			wantGets  int
+		}{
+			{
+				name: "follows next to a match",
+				pages: []respStep{
+					{status: 200, body: `{"items":[{"id":"o1","name":"Other","owner":{"id":"u1"}}],"next":"NEXT"}`},
+					{status: 200, body: `{"items":[{"id":"pl1","name":"Last Liked","owner":{"id":"u1"},"description":"d"}],"next":null}`},
+				},
+				wantID: "pl1", wantDesc: "d", wantFound: true, wantGets: 2,
+			},
+			{
+				name: "complete listing without match is not found",
+				pages: []respStep{
+					{status: 200, body: fullPage},
+					{status: 200, body: `{"items":[{"id":"o51","name":"Other 51","owner":{"id":"u2"}}],"total":51,"next":null}`},
+				},
+				wantGets: 2,
+			},
+			{
+				// The GET is retried, then the failure is surfaced instead of
+				// being mistaken for "not found".
+				name: "error on later page is returned",
+				pages: []respStep{
+					{status: 200, body: `{"items":[{"id":"o1","name":"Other","owner":{"id":"u2"}}],"total":2,"next":"NEXT"}`},
+					{status: 500, body: "boom"},
+				},
+				wantErr: "HTTP 500: boom", wantGets: 1 + testMaxRetries,
+			},
+			{
+				name: "incomplete listing reports every page",
+				pages: []respStep{
+					{status: 200, body: `{"items":[{"id":"o1","name":"Other","owner":{"id":"u2"}}],"total":2,"next":"NEXT"}`},
+					{status: 200, body: `{"items":null,"total":2,"next":null}`},
+				},
+				wantErr:  `ruled out 1 of total 2; refusing to treat "Last Liked" as not found; API responses: [{"total":2,"next":"NEXT","items_count":1,"items":[]},{"total":2,"next":"","items_count":0,"items":null}]`,
+				wantGets: 2,
+			},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				var srv *httptest.Server
+				nextURL := func(page int) string { return fmt.Sprintf("%s/me/playlists?page=%d", srv.URL, page) }
+				rec := &requestRecorder{}
+				srv = httptest.NewServer(rec.middleware(func(w http.ResponseWriter, r *http.Request) {
+					page := 1
+					if p := r.URL.Query().Get("page"); p != "" {
+						page, _ = strconv.Atoi(p)
+					}
+					st := tc.pages[page-1]
+					w.WriteHeader(st.status)
+					_, _ = w.Write([]byte(strings.ReplaceAll(st.body, "NEXT", nextURL(page+1))))
+				}))
+				defer srv.Close()
+
+				c, _ := newTestClient(t, srv)
+				id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+
+				if tc.wantErr != "" {
+					errContains(t, err, strings.ReplaceAll(tc.wantErr, "NEXT", nextURL(2)))
+				} else if err != nil {
+					t.Fatalf("unexpected error: %v", err)
+				}
+				if id != tc.wantID || desc != tc.wantDesc || found != tc.wantFound {
+					t.Errorf("FindPlaylist() = (%q, %q, %v), want (%q, %q, %v)", id, desc, found, tc.wantID, tc.wantDesc, tc.wantFound)
+				}
+				if got := rec.count(); got != tc.wantGets {
+					t.Errorf("requests = %d, want %d", got, tc.wantGets)
 				}
 			})
 		}
 	})
 
-	t.Run("complete empty library returns found=false without error", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"items":[],"total":0,"next":null}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
+	t.Run("incomplete or malformed listing fails closed with diagnostics", func(t *testing.T) {
+		// incomplete builds the full error text: the refusal plus the sanitized
+		// per-page diagnostics (A-83).
+		incomplete := func(ruledOut, total, diag string) string {
+			return fmt.Sprintf(`playlist listing incomplete: ruled out %s of total %s; refusing to treat "Last Liked" as not found; API responses: %s`, ruledOut, total, diag)
 		}
-		if found {
-			t.Fatalf("expected found=false for complete empty library, got true (id=%q)", id)
-		}
-		if id != "" || desc != "" {
-			t.Fatalf("expected empty id/desc, got id=%q desc=%q", id, desc)
-		}
-	})
-
-	t.Run("same-name playlist of another owner is ruled out", func(t *testing.T) {
-		// /me/playlists also lists followed playlists, so another user's
-		// "Last Liked" is a real, provably-not-ours entry.
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{
-				"items": [
-					{"id": "foreign", "name": "Last Liked", "owner": {"id": "u2"}, "description": "x"}
-				],
-				"total": 1,
-				"next": null
-			}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if found || id != "" || desc != "" {
-			t.Fatalf("expected not found, got found=%v id=%q desc=%q", found, id, desc)
-		}
-	})
-
-	t.Run("error on later page is returned, not treated as not found", func(t *testing.T) {
-		var srv *httptest.Server
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me/playlists", func(w http.ResponseWriter, r *http.Request) {
-			if r.URL.RawQuery == "page=2" {
-				w.WriteHeader(http.StatusInternalServerError)
-				return
-			}
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(fmt.Sprintf(`{
-				"items": [
-					{"id": "other1", "name": "Other", "owner": {"id": "u1"}, "description": ""}
-				],
-				"total": 2,
-				"next": %q
-			}`, srv.URL+"/me/playlists?page=2")))
-		})
-		srv = httptest.NewServer(mux)
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		errContains(t, err, "HTTP 500")
-		if found || id != "" || desc != "" {
-			t.Fatalf("expected not found with error, got found=%v id=%q desc=%q", found, id, desc)
-		}
-	})
-
-	t.Run("complete two-page no match returns found=false without error", func(t *testing.T) {
-		var srv *httptest.Server
-		mux := http.NewServeMux()
-		mux.HandleFunc("/me/playlists", func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			if r.URL.RawQuery == "page=2" {
-				_, _ = w.Write([]byte(`{
-					"items": [
-						{"id": "other51", "name": "Other 51", "owner": {"id": "u2"}, "description": ""}
-					],
-					"total": 51,
-					"next": null
-				}`))
-				return
-			}
-			var items []string
-			for i := 1; i <= 50; i++ {
-				items = append(items, fmt.Sprintf(
-					`{"id": "other%d", "name": "Other %d", "owner": {"id": "u2"}, "description": ""}`, i, i))
-			}
-			next := srv.URL + "/me/playlists?page=2"
-			_, _ = w.Write([]byte(fmt.Sprintf(`{
-				"items": [%s],
-				"total": 51,
-				"next": %q
-			}`, strings.Join(items, ", "), next)))
-		})
-		rec := &requestRecorder{}
-		srv = httptest.NewServer(rec.middleware(http.HandlerFunc(mux.ServeHTTP)))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err != nil {
-			t.Fatalf("unexpected error: %v", err)
-		}
-		if found {
-			t.Fatalf("expected found=false, got true (id=%q desc=%q)", id, desc)
-		}
-		if id != "" || desc != "" {
-			t.Fatalf("expected empty id/desc, got id=%q desc=%q", id, desc)
-		}
-		var playlistReqs []reqLog
-		for _, req := range rec.all() {
-			if req.Path == "/me/playlists" {
-				playlistReqs = append(playlistReqs, req)
-			}
-		}
-		if len(playlistReqs) != 2 {
-			t.Fatalf("expected both pages requested (2 GETs to /me/playlists), got %d: %+v", len(playlistReqs), playlistReqs)
-		}
-	})
-
-	t.Run("incomplete listing includes screenshot API diagnostics", func(t *testing.T) {
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write([]byte(`{"items":null,"total":44,"next":null}`))
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
-		if err == nil {
-			t.Fatal("expected incomplete-listing error, got nil")
-		}
-		// Original application-level error stays intact...
-		errContains(t, err, "playlist listing incomplete")
-		errContains(t, err, "ruled out 0 of total 44")
-		// ...and is followed by sanitized API listing diagnostics (A-83).
-		errContains(t, err, "API responses:")
-		errContains(t, err, `"items":null`)
-		errContains(t, err, `"items_count":0`)
-		errContains(t, err, `"total":44`)
-		if found {
-			t.Errorf("found = true, want false when listing is incomplete")
-		}
-		if id != "" || desc != "" {
-			t.Errorf("id/description = (%q, %q), want both empty when listing is incomplete", id, desc)
-		}
-	})
-
-	t.Run("listing diagnostics are bounded and sanitized", func(t *testing.T) {
-		hugeID := strings.Repeat("a", 5000)
-		body, err := json.Marshal(map[string]any{
-			"items": []map[string]any{
-				{
-					// Provably ruled out: different name.
-					"id":          "other1",
-					"name":        "Other",
-					"owner":       map[string]any{"id": "u2"},
-					"description": "ruled-out-secret",
-				},
-				{
-					// Ambiguous: same name, unknown owner. Huge whitelisted id
-					// forces the diagnostics cap to be exercised.
-					"id":          hugeID,
-					"name":        "Last Liked",
-					"owner":       map[string]any{},
-					"description": "ambiguous-secret",
-					"external_urls": map[string]any{
-						"spotify": "https://open.spotify.com/playlist/" + hugeID,
-					},
-					"images": []map[string]any{
-						{"url": "https://i.scdn.co/image/cover.png", "width": 640, "height": 640},
-					},
-				},
-			},
-			"total": 44,
-			"next":  nil,
-		})
-		if err != nil {
-			t.Fatalf("failed to marshal fixture: %v", err)
-		}
-		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.WriteHeader(http.StatusOK)
-			_, _ = w.Write(body)
-		}))
-		defer srv.Close()
-
-		c, _ := newTestClient(t, srv)
-
-		id, desc, found, ferr := c.FindPlaylist("Last Liked", "u1")
-		if ferr == nil {
-			t.Fatal("expected incomplete-listing error (ruled out 1 of total 44), got nil")
-		}
-		errText := ferr.Error()
-		errContains(t, ferr, "playlist listing incomplete")
-		// Diagnostics block present and capped with a truncation marker...
-		errContains(t, ferr, "API responses:")
-		errContains(t, ferr, "[truncated]")
-		if len(errText) > 4100 {
-			t.Errorf("error length = %d, want <= 4100 (bounded diagnostics)", len(errText))
-		}
-		if !utf8.ValidString(errText) {
-			t.Error("error contains invalid UTF-8 after truncation")
-		}
-		// ...and sanitized: no descriptions, no external_urls/images payloads.
-		for _, secret := range []string{"ruled-out-secret", "ambiguous-secret", "external_urls", "images"} {
-			if strings.Contains(errText, secret) {
-				t.Errorf("error leaks sensitive field %q: %.200s", secret, errText)
-			}
-		}
-		if found || id != "" || desc != "" {
-			t.Errorf("expected not found with empty id/desc, got found=%v id=%q desc=%q", found, id, desc)
-		}
-	})
-
-	t.Run("listing diagnostics shapes", func(t *testing.T) {
 		cases := []struct {
-			name, body string
-			want       []string
-			notWant    []string
+			name    string
+			body    string
+			want    string   // substring of the error
+			notWant []string // must never leak into the error
 		}{
 			{
-				// All returned items ruled out, but fewer than total: items must
-				// read as an empty list, not as a null items field from the API.
-				name: "all_ruled_out_page_shows_empty_list",
+				name: "empty object",
+				body: `{}`,
+				want: incomplete("0", "missing", `[{"total":null,"next":"","items_count":0,"items":null}]`),
+			},
+			{
+				name: "missing total",
+				body: `{"items":[{"id":"o1","name":"Other","owner":{"id":"u2"}}],"next":null}`,
+				want: incomplete("1", "missing", `[{"total":null,"next":"","items_count":1,"items":[]}]`),
+			},
+			{
+				// The production case from the A-83 screenshot.
+				name: "null items with total",
+				body: `{"items":null,"total":44,"next":null}`,
+				want: incomplete("0", "44", `[{"total":44,"next":"","items_count":0,"items":null}]`),
+			},
+			{
+				// All returned items ruled out but fewer than total: items reads
+				// as an empty list, not as a null items field from the API.
+				name: "fewer items than total",
 				body: `{"items":[{"id":"o1","name":"Other","owner":{"id":"u2"}}],"total":2,"next":null}`,
-				want: []string{`"items":[]`, `"items_count":1`},
+				want: incomplete("1", "2", `[{"total":2,"next":"","items_count":1,"items":[]}]`),
+			},
+			{
+				name: "null item",
+				body: `{"items":[null],"total":1,"next":null}`,
+				want: incomplete("0", "1", `[{"total":1,"next":"","items_count":1,"items":[null]}]`),
+			},
+			{
+				name: "same-name ownerless item",
+				body: `{"items":[{"id":"p1","name":"Last Liked"}],"total":1,"next":null}`,
+				want: incomplete("0", "1", `[{"total":1,"next":"","items_count":1,"items":[{"id":"p1","name":"Last Liked","owner":{"id":""}}]}]`),
+			},
+			{
+				name: "nameless item",
+				body: `{"items":[{"id":"p1","owner":{"id":"u2"}}],"total":1,"next":null}`,
+				want: incomplete("0", "1", `[{"total":1,"next":"","items_count":1,"items":[{"id":"p1","name":"","owner":{"id":"u2"}}]}]`),
+			},
+			{
+				// Only id, name and owner.id of unruled items are reported;
+				// ruled-out items and every other field are dropped.
+				name: "diagnostics are sanitized",
+				body: `{"items":[
+					{"id":"o1","name":"Other","owner":{"id":"u2"},"description":"ruled-out-secret"},
+					{"id":"p1","name":"Last Liked","owner":{},"description":"ambiguous-secret",
+					 "external_urls":{"spotify":"https://open.spotify.com/playlist/p1"},
+					 "images":[{"url":"https://i.scdn.co/image/cover.png"}]}
+				],"total":2,"next":null}`,
+				want:    incomplete("1", "2", `[{"total":2,"next":"","items_count":2,"items":[{"id":"p1","name":"Last Liked","owner":{"id":""}}]}]`),
+				notWant: []string{"secret", "spotify.com", "scdn.co"},
 			},
 			{
 				// Valid JSON of the wrong shape fails decoding: the error names
 				// the mismatch but never echoes the payload.
-				name:    "non_array_items_rejected_without_payload",
+				name:    "non-array items rejected without payload",
 				body:    `{"items":{"leak":"secret-payload"},"total":1,"next":null}`,
-				want:    []string{"unexpected response", "cannot unmarshal object"},
+				want:    "unexpected response: json: cannot unmarshal object",
 				notWant: []string{"secret-payload"},
-			},
-			{
-				name: "missing_owner_id_is_empty",
-				body: `{"items":[{"id":"p1","name":"Last Liked"}],"total":1,"next":null}`,
-				want: []string{`{"id":"p1","name":"Last Liked","owner":{"id":""}}`},
-			},
-			{
-				name: "missing_total_reported",
-				body: `{"items":[],"next":null}`,
-				want: []string{"ruled out 0 of total missing", `"total":null`},
 			},
 		}
 		for _, tc := range cases {
@@ -1467,16 +938,46 @@ func TestFindPlaylist(t *testing.T) {
 				defer srv.Close()
 
 				c, _ := newTestClient(t, srv)
-				_, _, _, err := c.FindPlaylist("Last Liked", "u1")
-				for _, w := range tc.want {
-					errContains(t, err, w)
-				}
+				id, desc, found, err := c.FindPlaylist("Last Liked", "u1")
+
+				errContains(t, err, tc.want)
 				for _, nw := range tc.notWant {
 					if strings.Contains(err.Error(), nw) {
 						t.Errorf("error leaks %q: %v", nw, err)
 					}
 				}
+				if id != "" || desc != "" || found {
+					t.Errorf("FindPlaylist() = (%q, %q, %v), want empty and not found on error", id, desc, found)
+				}
 			})
+		}
+	})
+
+	t.Run("listing diagnostics are capped on a rune boundary", func(t *testing.T) {
+		// A huge multi-byte id on an ambiguous entry overflows the cap, and
+		// the cut lands inside a rune.
+		body := fmt.Sprintf(`{"items":[{"id":%q,"name":"Last Liked"}],"total":1,"next":null}`, strings.Repeat("日", 2000))
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			_, _ = w.Write([]byte(body))
+		}))
+		defer srv.Close()
+
+		c, _ := newTestClient(t, srv)
+		_, _, _, err := c.FindPlaylist("Last Liked", "u1")
+
+		errContains(t, err, "playlist listing incomplete")
+		_, diag, ok := strings.Cut(err.Error(), "; API responses: ")
+		if !ok {
+			t.Fatalf("error has no diagnostics block: %.200q", err)
+		}
+		if len(diag) > 3900 {
+			t.Errorf("diagnostics length = %d, want <= 3900", len(diag))
+		}
+		if !strings.HasSuffix(diag, "...[truncated]") {
+			t.Errorf("diagnostics tail = %q, want ...[truncated] marker", diag[max(0, len(diag)-40):])
+		}
+		if !utf8.ValidString(diag) {
+			t.Errorf("diagnostics are not valid UTF-8 after truncation")
 		}
 	})
 }
