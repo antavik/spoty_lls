@@ -296,10 +296,12 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 		if authErr := c.Authenticate(); authErr != nil {
 			return nil, false, 0, authErr
 		}
-		return nil, true, 0, fmt.Errorf("%s %s -> HTTP 401: retrying after token refresh", method, url)
+		return nil, true, 0,
+			fmt.Errorf("%s %s -> HTTP 401: retrying after token refresh: %s", method, url, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode == http.StatusTooManyRequests:
-		return nil, true, c.retryAfter(resp), fmt.Errorf("%s %s -> HTTP 429", method, url)
+		return nil, true, c.retryAfter(resp),
+			fmt.Errorf("%s %s -> HTTP 429: %s", method, url, strings.TrimSpace(string(content)))
 
 	case resp.StatusCode >= 500:
 		return nil, retryUnknown, config.RetryDelay,
@@ -316,7 +318,8 @@ func (c *Client) attempt(method, url string, body any) (result map[string]any, r
 
 	var decoded map[string]any
 	if jsonErr := json.Unmarshal(content, &decoded); jsonErr != nil {
-		return nil, false, 0, fmt.Errorf("%s %s -> invalid JSON response", method, url)
+		return nil, false, 0,
+			fmt.Errorf("%s %s -> invalid JSON response: %s", method, url, strings.TrimSpace(string(content)))
 	}
 	return decoded, false, 0, nil
 }

@@ -398,13 +398,14 @@ func TestDoRetry(t *testing.T) {
 	})
 
 	t.Run("401 exhausted after max retries errors", func(t *testing.T) {
+		const body = `{"error":"invalid_token"}`
 		meRec := &requestRecorder{}
 		mux := http.NewServeMux()
 		mux.HandleFunc("/token", serveSteps([]respStep{
 			{status: 200, body: `{"access_token":"newtok"}`},
 		}))
 		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
-			{status: 401},
+			{status: 401, body: body},
 		})))
 		srv := httptest.NewServer(mux)
 		defer srv.Close()
@@ -415,11 +416,38 @@ func TestDoRetry(t *testing.T) {
 		if err == nil {
 			t.Fatal("expected error after exhausting retries on persistent 401, got nil")
 		}
+		errContains(t, err, body)
 		if meRec.count() != testMaxRetries {
 			t.Fatalf("expected %d /me attempts, got %d", testMaxRetries, meRec.count())
 		}
 		if !allZero(rec.durations()) {
 			t.Fatalf("expected no positive sleep for 401 retries, got %v", rec.durations())
+		}
+	})
+
+	t.Run("429 exhausted after max retries errors with response body", func(t *testing.T) {
+		const body = `{"error":"rate_limited"}`
+		meRec := &requestRecorder{}
+		mux := http.NewServeMux()
+		mux.HandleFunc("/me", meRec.middleware(serveSteps([]respStep{
+			{status: 429, header: map[string]string{"Retry-After": "7"}, body: body},
+		})))
+		srv := httptest.NewServer(mux)
+		defer srv.Close()
+
+		c, rec := newTestClient(t, srv)
+
+		_, err := c.CurrentUserID()
+		if err == nil {
+			t.Fatal("expected error after exhausting retries on persistent 429, got nil")
+		}
+		errContains(t, err, body)
+		if meRec.count() != testMaxRetries {
+			t.Fatalf("expected %d /me attempts, got %d", testMaxRetries, meRec.count())
+		}
+		want := []time.Duration{7 * time.Second, 7 * time.Second}
+		if !equalDurations(rec.durations(), want) {
+			t.Fatalf("expected Retry-After sleeps %v, got %v", want, rec.durations())
 		}
 	})
 
@@ -774,9 +802,11 @@ func TestDoRetry(t *testing.T) {
 
 		c, _ := newTestClient(t, srv)
 
-		if _, err := c.CurrentUserID(); err == nil {
+		_, err := c.CurrentUserID()
+		if err == nil {
 			t.Fatal("expected error for invalid JSON 2xx body, got nil")
 		}
+		errContains(t, err, "not-json")
 	})
 
 	t.Run("unauthenticated client errors without making a request", func(t *testing.T) {

@@ -29,7 +29,7 @@ Key design goals:
    - `FindPlaylist` reports `found=false` only after proving the listing is complete: every playlist must be accounted for by the page `total` (must be present) and ruled out by name/owner. Incomplete or ambiguous listings (missing/invalid `total`, null items, same-name entries without a known owner, …) → error instead of "not found", so a duplicate playlist is never created on an unproven miss.
    - Stored hash (parsed from description) == digest → skip.
    - Else `ReplaceTracks` (PUT first ≤100, POST remaining ≤100-chunks) + `ChangeDetails` (rewrite description with count/timestamp/hash).
-4. On any failure: `Run` calls `notify("spoty_lls failed: …")` (Telegram, best-effort) and returns the error; `run()` returns exit code 1.
+4. On any failure: `Run` calls `notify("spoty_lls failed: …")` (Telegram, best-effort) and returns the error; `run()` returns exit code 1. The failure text carries the raw Spotify response body where the client has one (see Retry model), so it reaches both stderr and Telegram.
 
 ## Source layout
 
@@ -41,7 +41,7 @@ Key design goals:
 | `internal/spotify/client.go` | `Client`: auth, core `do()` with retry loop, pagination, all Web API calls. No separate error taxonomy — plain `fmt.Errorf` errors; retry classification lives in `attempt()`/`do()`. |
 | `internal/helpers/helpers.go` | `Track` type + pure functions: `ComputeTracksHash`, `URIs`, `ParseHash`, `BuildDescription`, `Str2Bool`. |
 | `internal/app/sync.go` | `Run()` orchestrator + `SpotifyAPI` interface (the test seam). |
-| `internal/app/alerting.go` | `NotifyTelegram` — best-effort, no-op if bot token/chat ID unset. |
+| `internal/app/alerting.go` | `NotifyTelegram` — best-effort, no-op if bot token/chat ID unset. Sends the message with `parse_mode=HTML` wrapped in a `<pre>` code block: the raw text is HTML-escaped (`html.EscapeString`) so arbitrary error text (incl. raw Spotify response bodies) renders as plain text. The complete formatted string is capped at 3900 bytes; when needed the RAW text is shortened on rune boundaries and `\n...[truncated]` is appended before `</pre>` (truncation happens before escaping, so output is always valid UTF-8 with no partial entities, and at least the first rune survives). Only the Telegram text is ever truncated — `lgr` stderr logging is not. |
 | `scripts/cron-run.sh` | Host-cron wrapper: pull image (cached fallback, old image removed), skip if already running (container name = lock), hardened `docker run --init`, propagate exit code. Shellchecked in CI. |
 
 ## Retry model (`internal/spotify/client.go`)
@@ -52,6 +52,7 @@ Key design goals:
 - **5xx / network error** → wait 2s (`config.RetryDelay`), retry — **except API POSTs** (`CreatePlaylist`, `ReplaceTracks` append): on a 5xx or network error the outcome of an in-flight POST is unknown (the write may already have been applied), so they return an error immediately with **no retry**.
 - **Other 4xx** → immediate error, **no retry**.
 - 2xx empty body → empty map; invalid JSON → error.
+- **Error visibility:** every HTTP failure from Spotify embeds the raw response body in the error text (`… -> HTTP 4xx/5xx: <body>`; 401/429/invalid-JSON likewise). That text flows unchanged into the `[ERROR]` log on stderr and into the Telegram notification (HTML-escaped inside a `<pre>` block — see `internal/app/alerting.go`), so API failures surface with the raw API response.
 
 Spotify paging/batching (`config`): `Page=50`, `Batch=100`, `DefaultLikedLimit=100` (overridable via `SPOTIFY_LIKED_LIMIT`).
 
